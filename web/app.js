@@ -1,0 +1,357 @@
+const state = {
+  config: {
+    allowed_extensions: [".md", ".pdf", ".doc", ".docx"],
+    max_upload_mb: 200,
+    stages: [],
+  },
+  files: [],
+  tasks: [],
+  selectedTaskId: null,
+  uploading: false,
+};
+
+const elements = {
+  activeFile: document.querySelector("#activeFile"),
+  dropZone: document.querySelector("#dropZone"),
+  fileInput: document.querySelector("#fileInput"),
+  fileQueue: document.querySelector("#fileQueue"),
+  historyCount: document.querySelector("#historyCount"),
+  historyList: document.querySelector("#historyList"),
+  limitHint: document.querySelector("#limitHint"),
+  pipelineList: document.querySelector("#pipelineList"),
+  progressBar: document.querySelector("#progressBar"),
+  progressLabel: document.querySelector("#progressLabel"),
+  progressValue: document.querySelector("#progressValue"),
+  resultPanel: document.querySelector("#resultPanel"),
+  startButton: document.querySelector("#startButton"),
+  systemState: document.querySelector("#systemState"),
+  taskStatus: document.querySelector("#taskStatus"),
+  toastRegion: document.querySelector("#toastRegion"),
+};
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function formatTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
+}
+
+function fileKind(filename) {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith(".pdf")) return "PDF";
+  if (lower.endsWith(".doc") || lower.endsWith(".docx")) return "WORD";
+  return "MD";
+}
+
+function toast(message, isError = false) {
+  const item = document.createElement("div");
+  item.className = `toast${isError ? " error" : ""}`;
+  item.textContent = message;
+  elements.toastRegion.append(item);
+  window.setTimeout(() => item.remove(), 4200);
+}
+
+function renderQueue() {
+  if (!state.files.length) {
+    elements.fileQueue.innerHTML = '<div class="queue-empty">尚未选择文件</div>';
+  } else {
+    elements.fileQueue.innerHTML = state.files
+      .map(
+        (file, index) => `
+          <div class="queued-file">
+            <span class="file-type">${fileKind(file.name)}</span>
+            <div class="file-copy">
+              <strong title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</strong>
+              <span>${formatBytes(file.size)}</span>
+            </div>
+            <button class="remove-file" type="button" data-remove-index="${index}" aria-label="移除 ${escapeHtml(file.name)}">×</button>
+          </div>`,
+      )
+      .join("");
+  }
+  elements.startButton.disabled = !state.files.length || state.uploading;
+  elements.startButton.querySelector("span").textContent = state.uploading
+    ? "正在上传…"
+    : state.files.length > 1
+      ? `开始入库（${state.files.length}）`
+      : "开始入库";
+}
+
+function addFiles(fileList) {
+  const maxBytes = state.config.max_upload_mb * 1024 * 1024;
+  const allowed = new Set(state.config.allowed_extensions);
+  for (const file of fileList) {
+    const extension = file.name.includes(".") ? `.${file.name.split(".").pop().toLowerCase()}` : "";
+    if (!allowed.has(extension)) {
+      toast(`${file.name}：仅支持 PDF、Markdown 或 Word`, true);
+      continue;
+    }
+    if (file.size > maxBytes) {
+      toast(`${file.name}：超过 ${state.config.max_upload_mb} MB`, true);
+      continue;
+    }
+    const duplicate = state.files.some(
+      (item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified,
+    );
+    if (!duplicate) state.files.push(file);
+  }
+  renderQueue();
+}
+
+function renderPipeline(task) {
+  const stages = state.config.stages.filter((stage) => !["queued", "completed"].includes(stage.key));
+  const currentIndex = stages.findIndex((stage) => stage.key === task?.stage);
+  const completed = task?.status === "completed";
+
+  elements.pipelineList.innerHTML = stages
+    .map((stage, index) => {
+      let className = "";
+      if (completed || (currentIndex >= 0 && index < currentIndex)) className = "done";
+      if (task?.status === "running" && index === currentIndex) className = "active";
+      if (task?.status === "failed" && index === currentIndex) className = "failed";
+      const marker = className === "done" ? "✓" : String(index + 1).padStart(2, "0");
+      return `
+        <li class="pipeline-step ${className}">
+          <i class="step-index">${marker}</i>
+          <strong>${escapeHtml(stage.label)}</strong>
+        </li>`;
+    })
+    .join("");
+}
+
+function renderSelectedTask() {
+  const task = state.tasks.find((item) => item.id === state.selectedTaskId) ?? state.tasks[0] ?? null;
+  if (task && task.id !== state.selectedTaskId) state.selectedTaskId = task.id;
+
+  if (!task) {
+    elements.activeFile.innerHTML = `
+      <div class="file-emblem">—</div>
+      <div><strong>还没有处理任务</strong><span>上传后可在这里查看每一步进度</span></div>`;
+    elements.taskStatus.className = "task-status idle";
+    elements.taskStatus.textContent = "等待文件";
+    elements.progressLabel.textContent = "等待开始";
+    elements.progressValue.textContent = "0%";
+    elements.progressBar.style.width = "0%";
+    elements.resultPanel.hidden = true;
+    renderPipeline(null);
+    return;
+  }
+
+  elements.activeFile.innerHTML = `
+    <div class="file-emblem">${fileKind(task.filename)}</div>
+    <div>
+      <strong title="${escapeHtml(task.filename)}">${escapeHtml(task.filename)}</strong>
+      <span>${formatBytes(task.size)} · 任务 ${escapeHtml(task.id)}</span>
+    </div>`;
+  elements.taskStatus.className = `task-status ${task.status}`;
+  elements.taskStatus.textContent = {
+    queued: "排队中",
+    running: "处理中",
+    completed: "已完成",
+    failed: "失败",
+  }[task.status] ?? task.status;
+  elements.progressLabel.textContent = task.message || task.stage_label;
+  elements.progressValue.textContent = `${task.progress}%`;
+  elements.progressBar.style.width = `${task.progress}%`;
+  renderPipeline(task);
+
+  if (task.status === "completed" && task.result) {
+    const result = task.result;
+    elements.resultPanel.hidden = false;
+    elements.resultPanel.innerHTML = `
+      <h3>入库结果</h3>
+      <div class="result-grid">
+        <div><span>识别商品</span><strong title="${escapeHtml(result.item_name || "未识别")}">${escapeHtml(result.item_name || "未识别")}</strong></div>
+        <div><span>切片数量</span><strong>${result.chunks_count} chunks</strong></div>
+        <div><span>向量维度</span><strong>${result.vector_dimension} dim</strong></div>
+        <div><span>Milvus</span><strong>${result.milvus_written ? "写入成功" : "未确认"}</strong></div>
+        <div><span>总耗时</span><strong>${result.duration_seconds}s</strong></div>
+        <div><span>MinIO 对象</span><strong title="${escapeHtml(result.minio_object)}">${escapeHtml(result.minio_object || "—")}</strong></div>
+      </div>`;
+  } else if (task.status === "failed") {
+    elements.resultPanel.hidden = false;
+    elements.resultPanel.innerHTML = `<p class="error-copy"><strong>失败原因：</strong>${escapeHtml(task.error || "未知错误")}</p>`;
+  } else {
+    elements.resultPanel.hidden = true;
+  }
+}
+
+function renderHistory() {
+  elements.historyCount.textContent = `${state.tasks.length} 个任务`;
+  if (!state.tasks.length) {
+    elements.historyList.innerHTML = '<div class="history-empty">完成第一次上传后，任务会出现在这里。</div>';
+    return;
+  }
+  elements.historyList.innerHTML = state.tasks
+    .map((task) => {
+      const statusText = task.status === "failed" ? "失败" : `${task.progress}%`;
+      return `
+        <button class="history-row ${task.id === state.selectedTaskId ? "selected" : ""}" type="button" data-task-id="${task.id}">
+          <span class="history-name" title="${escapeHtml(task.filename)}">${escapeHtml(task.filename)}</span>
+          <span class="history-stage">${escapeHtml(task.stage_label)}</span>
+          <span class="history-progress ${task.status === "failed" ? "failed" : ""}">${statusText}</span>
+          <span class="history-time">${formatTime(task.updated_at)}</span>
+        </button>`;
+    })
+    .join("");
+}
+
+function renderTasks() {
+  renderSelectedTask();
+  renderHistory();
+}
+
+async function loadTasks() {
+  try {
+    const response = await fetch("/api/tasks", { cache: "no-store" });
+    if (!response.ok) throw new Error("无法读取任务状态");
+    const data = await response.json();
+    if (!Array.isArray(data.tasks)) throw new Error("任务状态格式无效");
+    state.tasks = data.tasks;
+    elements.systemState.classList.add("ready");
+    elements.systemState.querySelector("span:last-child").textContent = "入库服务已连接";
+    renderTasks();
+  } catch (error) {
+    elements.systemState.classList.remove("ready");
+    elements.systemState.querySelector("span:last-child").textContent = "入库服务未连接";
+  }
+}
+
+let taskPollTimer;
+let taskPollRunning = false;
+
+async function pollTasks() {
+  if (taskPollRunning) return;
+  window.clearTimeout(taskPollTimer);
+  taskPollRunning = true;
+  try {
+    await loadTasks();
+  } finally {
+    taskPollRunning = false;
+    const hasActiveTask = state.tasks.some((task) => task.status === "queued" || task.status === "running");
+    taskPollTimer = window.setTimeout(pollTasks, document.hidden ? 15000 : hasActiveTask ? 1600 : 8000);
+  }
+}
+
+function uploadFile(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/tasks?filename=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.responseType = "json";
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response);
+      else reject(new Error(xhr.response?.error || `上传失败（HTTP ${xhr.status}）`));
+    };
+    xhr.onerror = () => reject(new Error("网络连接中断"));
+    xhr.send(file);
+  });
+}
+
+async function startUpload() {
+  if (!state.files.length || state.uploading) return;
+  state.uploading = true;
+  renderQueue();
+  const pending = [...state.files];
+  let accepted = 0;
+
+  for (const file of pending) {
+    try {
+      const task = await uploadFile(file);
+      accepted += 1;
+      state.selectedTaskId = task.id;
+      state.tasks = [task, ...state.tasks.filter((item) => item.id !== task.id)];
+      renderTasks();
+    } catch (error) {
+      toast(`${file.name}：${error.message}`, true);
+    }
+  }
+
+  state.files = [];
+  state.uploading = false;
+  renderQueue();
+  if (accepted) toast(`${accepted} 个文件已进入入库队列`);
+  await pollTasks();
+}
+
+async function initialize() {
+  try {
+    const response = await fetch("/api/config", { cache: "no-store" });
+    if (!response.ok) throw new Error("config unavailable");
+    state.config = await response.json();
+    elements.limitHint.textContent = `单个文件最大 ${state.config.max_upload_mb} MB`;
+    elements.systemState.classList.add("ready");
+    elements.systemState.querySelector("span:last-child").textContent = "入库服务已连接";
+  } catch {
+    elements.systemState.querySelector("span:last-child").textContent = "入库服务未连接";
+    state.config.stages = [
+      "validate", "minio", "parse", "images", "split", "recognize", "embedding", "milvus",
+    ].map((key) => ({ key, label: key }));
+  }
+  renderQueue();
+  renderPipeline(null);
+  await pollTasks();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) pollTasks();
+});
+
+elements.dropZone.addEventListener("click", () => elements.fileInput.click());
+elements.dropZone.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    elements.fileInput.click();
+  }
+});
+elements.fileInput.addEventListener("change", (event) => {
+  addFiles(event.target.files);
+  event.target.value = "";
+});
+for (const eventName of ["dragenter", "dragover"]) {
+  elements.dropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    elements.dropZone.classList.add("dragging");
+  });
+}
+for (const eventName of ["dragleave", "drop"]) {
+  elements.dropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    elements.dropZone.classList.remove("dragging");
+  });
+}
+elements.dropZone.addEventListener("drop", (event) => addFiles(event.dataTransfer.files));
+elements.fileQueue.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-remove-index]");
+  if (!button) return;
+  state.files.splice(Number(button.dataset.removeIndex), 1);
+  renderQueue();
+});
+elements.historyList.addEventListener("click", (event) => {
+  const row = event.target.closest("[data-task-id]");
+  if (!row) return;
+  state.selectedTaskId = row.dataset.taskId;
+  renderTasks();
+});
+elements.startButton.addEventListener("click", startUpload);
+
+initialize();

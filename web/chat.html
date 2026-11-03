@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4f7fb" />
+    <title>小灵 · 灵库对话</title>
+    <link rel="stylesheet" href="/chat.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#conversationMain">跳到对话内容</a>
+    <div class="chat-shell">
+      <aside class="sidebar" id="sidebar" aria-label="对话导航">
+        <div class="sidebar-top">
+          <a class="brand" href="/chat" aria-label="灵库对话首页">
+            <span class="brand-symbol" aria-hidden="true">灵</span>
+            <span class="brand-copy"><strong>灵库</strong><small>LINGKU · KNOWLEDGE</small></span>
+          </a>
+          <button class="icon-button mobile-close" id="closeSidebar" type="button" aria-label="关闭菜单">×</button>
+        </div>
+        <button class="new-chat" id="newChat" type="button">
+          <span class="new-chat-icon" aria-hidden="true">＋</span><span>新建对话</span>
+        </button>
+        <div class="history-heading"><span>最近对话</span><span id="conversationCount">0</span></div>
+        <nav class="conversation-list" id="conversationList" aria-label="历史对话">
+          <p class="sidebar-empty">还没有对话记录</p>
+        </nav>
+        <div class="sidebar-bottom">
+          <a href="/" class="upload-link"><span aria-hidden="true">↗</span> 文档入库</a>
+          <span class="sidebar-caption">每段对话独立保存</span>
+        </div>
+      </aside>
+
+      <div class="mobile-scrim" id="mobileScrim" hidden></div>
+      <main class="conversation-main" id="conversationMain">
+        <header class="chat-topbar">
+          <button class="icon-button mobile-menu" id="openSidebar" type="button" aria-label="打开菜单">☰</button>
+          <div class="current-chat"><span class="current-chat-label">小灵 / 产品问答</span><strong id="currentTitle">新对话</strong></div>
+          <span class="save-indicator"><i aria-hidden="true"></i> 自动保存</span>
+        </header>
+
+        <section class="messages-area" id="messagesArea" aria-live="polite" aria-label="聊天消息">
+          <div class="welcome" id="welcome">
+            <span class="welcome-symbol" aria-hidden="true">灵</span>
+            <p class="welcome-kicker">小灵 · 你的产品资料助手</p>
+            <h1>从资料里，<br /><em>找到清楚的答案。</em></h1>
+            <p class="welcome-copy">问功能、查用法，也可以把两款产品放在一起比较。小灵会结合已入库资料回答，并保留对话方便继续追问。</p>
+            <div class="suggestions" aria-label="示例问题">
+              <button type="button" data-prompt="介绍华为显示器 B3-241H 的主要功能">了解一款产品 <span>↗</span></button>
+              <button type="button" data-prompt="比较华为显示器 B3-241H 和 B3-242H 的不同之处">比较两款产品 <span>↗</span></button>
+            </div>
+          </div>
+          <div class="message-list" id="messageList" hidden></div>
+        </section>
+
+        <div class="composer-wrap">
+          <div class="inline-error" id="inlineError" role="alert" hidden></div>
+          <form class="composer" id="messageForm">
+            <label class="sr-only" for="messageInput">输入问题</label>
+            <textarea id="messageInput" name="message" rows="1" maxlength="4000" placeholder="向小灵询问产品、功能或使用方法…" required></textarea>
+            <div class="composer-bottom">
+              <span>Enter 发送 · Shift + Enter 换行</span>
+              <button class="send-button" id="sendButton" type="submit" aria-label="发送消息" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-6 6m6-6 6 6" /></svg>
+              </button>
+            </div>
+          </form>
+          <p class="composer-note">小灵根据现有资料回答；关键参数请核对原始文档。</p>
+        </div>
+      </main>
+    </div>
+    <script src="/chat.js" defer></script>
+  </body>
+</html>
