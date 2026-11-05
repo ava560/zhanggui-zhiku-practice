@@ -18,6 +18,8 @@ if str(ROOT) not in sys.path:
 from upload.node_bge_embedding import node_bge_embedding
 from upload.node_docment_split import node_docment_split
 from upload.node_entry import node_entry
+from upload.corpus_scope import is_non_financial
+from upload.knowledge_graph import node_build_knowledge_graph
 from upload.node_import_milvus import node_import_milvus
 from upload.node_item_name_recognition import node_item_name_recognition
 from upload.node_md_to_img import node_md_to_img
@@ -47,6 +49,7 @@ workflow.add_node("node_docment_split", node_docment_split)
 workflow.add_node("node_item_name_recognition", node_item_name_recognition)
 workflow.add_node("node_bge_embedding", node_bge_embedding)
 workflow.add_node("node_import_milvus", node_import_milvus)
+workflow.add_node("node_build_knowledge_graph", node_build_knowledge_graph)
 
 workflow.add_edge(START, "node_entry")
 
@@ -74,7 +77,8 @@ workflow.add_edge("node_md_to_img", "node_docment_split")
 workflow.add_edge("node_docment_split", "node_item_name_recognition")
 workflow.add_edge("node_item_name_recognition", "node_bge_embedding")
 workflow.add_edge("node_bge_embedding", "node_import_milvus")
-workflow.add_edge("node_import_milvus", END)
+workflow.add_edge("node_import_milvus", "node_build_knowledge_graph")
+workflow.add_edge("node_build_knowledge_graph", END)
 
 kb_import_app = workflow.compile()
 
@@ -118,6 +122,9 @@ def main() -> None:
 
     failed: list[str] = []
     for path in files:
+        if is_non_financial(path.name):
+            logger.info("跳过与金融无关的文件: %s", path.name)
+            continue
         try:
             run_import(str(path))
         except Exception:

@@ -84,6 +84,60 @@ class WebSearchMcpTests(TestCase):
         self.assertEqual(seen["arguments"], {"query": "产品 A 如何重启？", "count": 5})
         self.assertEqual(results, [{"title": "官网", "url": "https://example.com/a", "content": "使用说明"}])
 
+    def test_dropped_mcp_connection_is_retried_against_the_same_service(self):
+        from search.node_web_search_mcp import search_web
+
+        calls = {"count": 0}
+
+        class FakeTransport:
+            def __init__(self, url, headers):
+                pass
+
+        class FakeClient:
+            def __init__(self, transport):
+                pass
+
+            async def __aenter__(self):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise RuntimeError("Client failed to connect")
+                return self
+
+            async def __aexit__(self, *_args):
+                pass
+
+            async def list_tools(self):
+                return [SimpleNamespace(name="search_pro", inputSchema={"properties": {"query": {"type": "string"}}})]
+
+            async def call_tool(self, name, arguments):
+                return SimpleNamespace(
+                    is_error=False,
+                    data={"results": [{"title": "官网", "url": "https://example.com/retry", "snippet": "说明"}]},
+                    content=[],
+                )
+
+        fastmcp = types.ModuleType("fastmcp")
+        fastmcp.Client = FakeClient
+        client_package = types.ModuleType("fastmcp.client")
+        transports = types.ModuleType("fastmcp.client.transports")
+        transports.StreamableHttpTransport = FakeTransport
+        with (
+            patch.dict(sys.modules, {
+                "fastmcp": fastmcp,
+                "fastmcp.client": client_package,
+                "fastmcp.client.transports": transports,
+            }),
+            patch.dict(os.environ, {
+                "MCP_DASHSCOPE_BASE_URL": "https://example.com/mcp",
+                "MCP_DASHSCOPE_API_KEY": "test-key",
+            }),
+            patch("search.node_web_search_mcp.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            results = asyncio.run(search_web("什么是基金净值"))
+
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual(results[0]["url"], "https://example.com/retry")
+
     def test_mcp_text_json_deduplicates_urls_and_limits_to_five(self):
         from search.node_web_search_mcp import parse_search_results
 

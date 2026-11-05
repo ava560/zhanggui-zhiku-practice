@@ -36,15 +36,44 @@ def _ranked_unique(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique
 
 
+def _web_key(chunk: dict[str, Any]) -> tuple[str, ...] | None:
+    url = str(chunk.get("url") or "").strip()
+    if not url:
+        return None
+    return ("url", url)
+
+
+def _ranked_web(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """网页摘要按返回顺序计名次；没有链接的摘要不参与排序。"""
+    seen: set[str] = set()
+    ordered = []
+    for chunk in chunks:
+        url = str(chunk.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        ordered.append(chunk)
+    return ordered
+
+
 def fuse_chunks(
     embedding_chunks: list[dict[str, Any]],
     hyde_chunks: list[dict[str, Any]],
+    web_chunks: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """每路先按相似度排名；同一块每路最多贡献一次 1/(60+排名)。"""
+    """每路先按自己的顺序去重；同一条结果在同一路最多贡献一次 1/(60+排名)。"""
     fused: dict[tuple[str, ...], dict[str, Any]] = {}
-    for source, chunks in (("embedding", embedding_chunks), ("hyde", hyde_chunks)):
-        for rank, chunk in enumerate(_ranked_unique(chunks), start=1):
-            key = _chunk_key(chunk)
+    groups: list[tuple[str, list[dict[str, Any]], Any]] = [
+        ("embedding", _ranked_unique(embedding_chunks), _chunk_key),
+        ("hyde", _ranked_unique(hyde_chunks), _chunk_key),
+    ]
+    if web_chunks is not None:
+        groups.append(("web", _ranked_web(web_chunks), _web_key))
+    for source, chunks, key_of in groups:
+        for rank, chunk in enumerate(chunks, start=1):
+            key = key_of(chunk)
+            if key is None:
+                continue
             if key not in fused:
                 fused[key] = {
                     "chunk_id": chunk.get("chunk_id"),
@@ -54,6 +83,12 @@ def fuse_chunks(
                     "rrf_score": 0.0,
                     "source_ranks": {},
                 }
+                if chunk.get("title"):
+                    fused[key]["title"] = chunk.get("title", "")
+                if chunk.get("url"):
+                    fused[key]["url"] = str(chunk.get("url") or "").strip()
+                if source == "web":
+                    fused[key]["source"] = "web"
             fused[key]["rrf_score"] += 1 / (RRF_K + rank)
             fused[key]["source_ranks"][source] = rank
     return sorted(fused.values(), key=lambda chunk: chunk["rrf_score"], reverse=True)

@@ -78,6 +78,13 @@ def node_entry(state: ImportGraphState) -> ImportGraphState:
         return state
 
     path = Path(document_path).expanduser()
+    from upload.corpus_scope import is_non_financial
+
+    if is_non_financial(path.name):
+        state["import_skip_reason"] = "non_financial"
+        logger.info("跳过与金融无关的文件: %s", path.name)
+        return state
+
     suffix = path.suffix.lower()
     state["file_title"] = path.stem
     output_dir = Path(state["local_dir"])

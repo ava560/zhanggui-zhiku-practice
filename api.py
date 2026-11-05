@@ -14,9 +14,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 import web_server
+from search.long_term_memory import get_memory_book
 from web_server import (
     MAX_UPLOAD_BYTES,
     PROJECT_ROOT,
@@ -202,6 +203,50 @@ def create_conversation(request: Request) -> JSONResponse:
         return _chat_failure(exc, new_user_id=new_user_id)
 
 
+@app.get("/api/sources/download")
+def download_source(name: str) -> Response:
+    from search.source_files import find_imported_file
+
+    path = find_imported_file(name)
+    if path is None:
+        return _json({"error": "没有找到可下载的资料"}, HTTPStatus.NOT_FOUND)
+    return FileResponse(path, filename=path.name, content_disposition_type="attachment")
+
+
+@app.get("/api/memory")
+def list_memory(request: Request) -> JSONResponse:
+    user_id, new_user_id = _chat_identity(request)
+    return _json({"items": get_memory_book().export(user_id)}, new_user_id=new_user_id)
+
+
+@app.post("/api/memory", status_code=HTTPStatus.CREATED)
+async def save_memory(request: Request) -> JSONResponse:
+    user_id, new_user_id = _chat_identity(request)
+    try:
+        payload = _read_json(await request.body())
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise ValueError("text 必须是文本")
+        item = get_memory_book().add(user_id, text, "settings")
+        return _json(item, HTTPStatus.CREATED, new_user_id=new_user_id)
+    except Exception as exc:
+        return _chat_failure(exc, new_user_id=new_user_id)
+
+
+@app.delete("/api/memory")
+async def delete_memory(request: Request) -> JSONResponse:
+    user_id, new_user_id = _chat_identity(request)
+    try:
+        payload = _read_json(await request.body())
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise ValueError("text 必须是文本")
+        removed = get_memory_book().delete(user_id, text)
+        return _json({"removed": removed}, new_user_id=new_user_id)
+    except Exception as exc:
+        return _chat_failure(exc, new_user_id=new_user_id)
+
+
 @app.get("/api/conversations/{conversation_id}")
 def get_conversation(conversation_id: str, request: Request) -> JSONResponse:
     if not re.fullmatch(r"[0-9a-f]{32}", conversation_id):
@@ -230,10 +275,113 @@ async def send_message(conversation_id: str, request: Request) -> JSONResponse:
             content,
             item_name_user_selection=payload.get("item_name_user_selection"),
             item_name_user_confirmed=payload.get("item_name_user_confirmed"),
+            answer_mode=_answer_mode(payload),
+            use_web_search=_use_web_search(payload),
         )
         return _json({"message": answer}, HTTPStatus.CREATED, new_user_id=new_user_id)
     except Exception as exc:
         return _chat_failure(exc, new_user_id=new_user_id)
+
+
+def _answer_mode(payload: dict) -> str:
+    mode = payload.get("mode") or "auto"
+    if mode not in {"auto", "fast", "deep"}:
+        raise ValueError("mode 只能是 auto、fast 或 deep")
+    return mode
+
+
+def _use_web_search(payload: dict) -> bool:
+    if "web_search" not in payload:
+        return True
+    value = payload.get("web_search")
+    if not isinstance(value, bool):
+        raise ValueError("web_search 必须是布尔值")
+    return value
+
+
+def _sse(event: dict) -> str:
+    return f"event: {event.get('event') or 'message'}\ndata: {json.dumps(event.get('data') or {}, ensure_ascii=False)}\n\n"
+
+
+@app.post("/api/conversations/{conversation_id}/messages/stream")
+async def stream_message(conversation_id: str, request: Request) -> Response:
+    if not re.fullmatch(r"[0-9a-f]{32}", conversation_id):
+        return _json({"error": "对话不存在"}, HTTPStatus.NOT_FOUND)
+    user_id, new_user_id = _chat_identity(request)
+    try:
+        payload = _read_json(await request.body())
+        content = payload.get("content")
+        if not isinstance(content, str):
+            raise ValueError("content 必须是文本")
+        mode = _answer_mode(payload)
+        use_web = _use_web_search(payload)
+    except Exception as exc:
+        return _chat_failure(exc, new_user_id=new_user_id)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def produce() -> None:
+        def report(text: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"event": "status", "data": {"text": text}}),
+                loop,
+            ).result()
+
+        try:
+            for event in get_chat_service().iter_events(
+                user_id,
+                conversation_id,
+                content,
+                item_name_user_selection=payload.get("item_name_user_selection"),
+                item_name_user_confirmed=payload.get("item_name_user_confirmed"),
+                answer_mode=mode,
+                use_web_search=use_web,
+                on_status=report,
+            ):
+                asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
+        except Exception as exc:
+            from chat_service import AnswerError
+
+            if isinstance(exc, AnswerError):
+                message = str(exc)
+            elif isinstance(exc, (LookupError, ValueError)):
+                message = str(exc)
+            else:
+                logger.exception("流式回答失败")
+                message = "聊天服务暂不可用，请检查 MongoDB 配置与连接"
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"event": "error", "data": {"message": message}}),
+                loop,
+            ).result()
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(None), loop).result()
+
+    producer = asyncio.create_task(asyncio.to_thread(produce))
+
+    async def generate():
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield _sse(event)
+        finally:
+            await producer
+
+    response = StreamingResponse(generate(), media_type="text/event-stream")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Accel-Buffering"] = "no"
+    if new_user_id:
+        response.set_cookie(
+            "knowledge_user",
+            new_user_id,
+            max_age=31536000,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+    return response
 
 
 def main() -> None:

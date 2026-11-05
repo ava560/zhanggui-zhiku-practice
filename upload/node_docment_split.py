@@ -752,8 +752,37 @@ def process_markdown(
     if content is None:
         content = md_path.read_text(encoding="utf-8")
     doc_title = extract_doc_title(content, md_path)
-    drafts = split_markdown(content, doc_title)
-    chunks = format_chunks(md_path.name, doc_title, drafts, file_title=file_title)
+    from upload.financial_chunks import detect_content_type, split_by_document_type
+
+    content_type = detect_content_type(content, md_path.name)
+    if content_type == "generic":
+        drafts = split_markdown(content, doc_title)
+        chunks = format_chunks(md_path.name, doc_title, drafts, file_title=file_title)
+    else:
+        chunks = []
+        for index, chunk in enumerate(split_by_document_type(content, content_type, title=doc_title), start=1):
+            locator = ["section=" + str(chunk.get("section") or "")]
+            if chunk.get("page"):
+                locator.append("page=" + str(chunk["page"]))
+            locator.append("parse_quality=" + str(chunk.get("parse_quality") or "ok"))
+            if chunk.get("numeric_verified") is False:
+                locator.append("numeric_verified=false")
+            chunks.append({
+                "file_name": md_path.name,
+                "file_title": file_title or md_path.name,
+                "part": index,
+                "title": doc_title,
+                "content": "【定位】" + ";".join(locator) + "\n" + chunk["content"],
+                "part_title": chunk.get("section") or doc_title,
+                "content_type": content_type,
+                "page": chunk.get("page"),
+                "section": chunk.get("section") or "",
+                "parent_id": chunk.get("parent_id") or "",
+                "parse_quality": chunk.get("parse_quality") or "ok",
+                "numeric_verified": chunk.get("numeric_verified", True),
+                "issuer": chunk.get("issuer") or "",
+                "publish_date": chunk.get("publish_date") or "",
+            })
     log_chunk_stats(md_path.name, chunks)
 
     per_file_path = md_path.with_name(f"{md_path.stem}_chunks.json")

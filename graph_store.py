@@ -106,6 +106,41 @@ def related_records(names: list[str]) -> tuple[list[str], list[str]]:
         driver.close()
 
 
+def load_business_edges() -> list:
+    """读取带来源编号的管理关系。连接失败时把异常抛给调用方，不能改写成共现。"""
+    from graph_relations import RelationEdge
+
+    driver = _driver()
+    try:
+        driver.verify_connectivity()
+        with driver.session(database=_database_name()) as session:
+            rows = session.run(
+                """
+                MATCH (source)-[rel:MANAGED_BY]->(target)
+                WHERE rel.evidence_id IS NOT NULL AND rel.evidence_id <> ''
+                RETURN source.id AS source_id, target.id AS target_id,
+                       rel.evidence_id AS evidence_id, rel.chunk_id AS chunk_id
+                """
+            )
+            edges = []
+            for row in rows:
+                source_id = str(row.get("source_id") or "").strip()
+                target_id = str(row.get("target_id") or "").strip()
+                evidence_id = str(row.get("evidence_id") or "").strip()
+                if not source_id or not target_id or not evidence_id:
+                    continue
+                edges.append(RelationEdge(
+                    source_id,
+                    "MANAGED_BY",
+                    target_id,
+                    (evidence_id,),
+                    str(row.get("chunk_id") or "").strip(),
+                ))
+        return edges
+    finally:
+        driver.close()
+
+
 def expand_relation_scope(state: dict) -> None:
     """在现有确认结果上补相关名称。不满足条件或图不可用时保持原检索范围。"""
     if state.get("awaiting_user_confirmation"):

@@ -136,17 +136,9 @@ def parse_search_results(response: Any) -> list[dict[str, str]]:
     return results
 
 
-async def search_web(question: str) -> list[dict[str, str]]:
-    """通过 Streamable HTTP 调用服务端实际提供的搜索工具。"""
-    url = os.getenv("MCP_DASHSCOPE_BASE_URL", "").strip()
-    api_key = os.getenv("MCP_DASHSCOPE_API_KEY", "").strip()
-    if not url or not api_key:
-        raise ValueError("请配置 MCP_DASHSCOPE_BASE_URL 和 MCP_DASHSCOPE_API_KEY")
-    try:
-        from fastmcp import Client
-        from fastmcp.client.transports import StreamableHttpTransport
-    except ImportError as exc:
-        raise RuntimeError("未安装 fastmcp，请安装 requirements.txt 中的依赖") from exc
+async def _search_web_once(url: str, api_key: str, question: str) -> list[dict[str, str]]:
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
 
     transport = StreamableHttpTransport(url=url, headers={"Authorization": f"Bearer {api_key}"})
     async with Client(transport) as client:
@@ -154,6 +146,36 @@ async def search_web(question: str) -> list[dict[str, str]]:
         tool_name = str(_tool_value(tool, "name"))
         result = await client.call_tool(tool_name, _tool_arguments(tool, question))
     return parse_search_results(result)
+
+
+async def search_web(question: str) -> list[dict[str, str]]:
+    """通过 Streamable HTTP 调用服务端实际提供的搜索工具。
+
+    百炼这条流式连接会偶尔在握手或读结果时断开，断开后换一条新连接再试。
+    """
+    url = os.getenv("MCP_DASHSCOPE_BASE_URL", "").strip()
+    api_key = os.getenv("MCP_DASHSCOPE_API_KEY", "").strip()
+    if not url or not api_key:
+        raise ValueError("请配置 MCP_DASHSCOPE_BASE_URL 和 MCP_DASHSCOPE_API_KEY")
+    try:
+        from fastmcp import Client  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError("未安装 fastmcp，请安装 requirements.txt 中的依赖") from exc
+
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            return await _search_web_once(url, api_key, question)
+        except ValueError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            logger.warning("百炼 MCP 第 %s 次连接失败：%s", attempt + 1, type(exc).__name__)
+            if attempt < 2:
+                await asyncio.sleep(1.5)
+    if last_error is not None:
+        raise last_error
+    return []
 
 
 def _output_path(state: ImportGraphState, question: str) -> Path:

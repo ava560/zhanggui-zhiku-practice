@@ -38,6 +38,10 @@ class ImportGraphState(TypedDict, total=False):
     chunks: list
     item_name: str
     embeddings_content: list
+    import_skip_reason: str
+    graph_status: str
+    import_skip_reason: str
+    graph_status: str
 
     # 问答链路：商品名提取、改写与 Milvus 商品名确认。
     user_id: str
@@ -87,6 +91,15 @@ class ImportGraphState(TypedDict, total=False):
     final_answer: str
     answer_image_urls: list[str]
     answer_message_seq: int
+    query_plan: dict[str, Any]
+    session_memory: dict[str, Any]
+    evidence_status: str
+    citations: list[dict[str, Any]]
+    search_error: str
+    answer_mode: str
+    defer_answer_generation: bool
+    graph_status: str
+    status_text: str
 
 
 graph_default_state: ImportGraphState = {

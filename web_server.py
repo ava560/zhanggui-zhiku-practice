@@ -47,7 +47,8 @@ STAGES = [
     {"key": "split", "label": "文档切片", "progress": 65},
     {"key": "recognize", "label": "识别商品", "progress": 75},
     {"key": "embedding", "label": "生成向量", "progress": 88},
-    {"key": "milvus", "label": "写入 Milvus", "progress": 97},
+    {"key": "milvus", "label": "写入 Milvus", "progress": 92},
+    {"key": "graph", "label": "写入知识图谱", "progress": 97},
     {"key": "completed", "label": "入库完成", "progress": 100},
 ]
 STAGE_BY_KEY = {stage["key"]: stage for stage in STAGES}
@@ -182,6 +183,7 @@ def process_task(task_id: str, source_path: Path, work_dir: Path) -> None:
         from upload.node_bge_embedding import node_bge_embedding
         from upload.node_docment_split import node_docment_split
         from upload.node_entry import node_entry
+        from upload.knowledge_graph import node_build_knowledge_graph
         from upload.node_import_milvus import node_import_milvus
         from upload.node_item_name_recognition import node_item_name_recognition
         from upload.node_md_to_img import node_md_to_img
@@ -194,6 +196,8 @@ def process_task(task_id: str, source_path: Path, work_dir: Path) -> None:
             local_dir=str(work_dir),
         )
         state = _run_node(task_id, state, "validate", "正在确认文件类型", node_entry)
+        if state.get("import_skip_reason") == "non_financial":
+            raise ValueError("与金融无关的文件不进入知识库")
         if not state.get("is_pdf_read_enabled") and not state.get("is_md_read_enabled"):
             raise ValueError("文件未通过校验，仅支持 PDF、Markdown 或 Word")
 
@@ -208,6 +212,7 @@ def process_task(task_id: str, source_path: Path, work_dir: Path) -> None:
         state = _run_node(task_id, state, "recognize", "正在识别文档对应商品", node_item_name_recognition)
         state = _run_node(task_id, state, "embedding", "正在生成稠密与稀疏向量", node_bge_embedding)
         state = _run_node(task_id, state, "milvus", "正在写入 Milvus 集合", node_import_milvus)
+        state = _run_node(task_id, state, "graph", "正在写入知识图谱", node_build_knowledge_graph)
 
         result = _result_summary(state, started)
         task_store.set_stage(task_id, "completed", "文件已完成向量化入库")

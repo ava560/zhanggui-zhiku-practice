@@ -25,7 +25,17 @@
         <nav class="conversation-list" id="conversationList" aria-label="历史对话">
           <p class="sidebar-empty">还没有对话记录</p>
         </nav>
+        <div class="memory-panel" id="memoryPanel" hidden>
+          <p class="memory-title">个性化 · 长期记忆</p>
+          <form id="memoryForm">
+            <label class="sr-only" for="memoryInput">要记住的内容</label>
+            <input id="memoryInput" maxlength="200" placeholder="写下要记住的偏好" />
+            <button type="submit">保存</button>
+          </form>
+          <ul id="memoryList"></ul>
+        </div>
         <div class="sidebar-bottom">
+          <button class="sidebar-tool" id="openMemory" type="button">个性化</button>
           <a href="/" class="upload-link"><span aria-hidden="true">↗</span> 文档入库</a>
           <span class="sidebar-caption">每段对话独立保存</span>
         </div>
@@ -34,20 +44,25 @@
       <div class="mobile-scrim" id="mobileScrim" hidden></div>
       <main class="conversation-main" id="conversationMain">
         <header class="chat-topbar">
+          <button class="icon-button menu-lines" id="collapseSidebar" type="button" aria-label="收起对话列表" aria-expanded="true">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+          </button>
           <button class="icon-button mobile-menu" id="openSidebar" type="button" aria-label="打开菜单">☰</button>
-          <div class="current-chat"><span class="current-chat-label">小灵 / 产品问答</span><strong id="currentTitle">新对话</strong></div>
+          <div class="current-chat"><span class="current-chat-label">小灵 / 金融知识</span><strong id="currentTitle">新对话</strong></div>
           <span class="save-indicator"><i aria-hidden="true"></i> 自动保存</span>
         </header>
 
         <section class="messages-area" id="messagesArea" aria-live="polite" aria-label="聊天消息">
           <div class="welcome" id="welcome">
             <span class="welcome-symbol" aria-hidden="true">灵</span>
-            <p class="welcome-kicker">小灵 · 你的产品资料助手</p>
-            <h1>从资料里，<br /><em>找到清楚的答案。</em></h1>
-            <p class="welcome-copy">问功能、查用法，也可以把两款产品放在一起比较。小灵会结合已入库资料回答，并保留对话方便继续追问。</p>
+            <p class="welcome-kicker">小灵 · 金融知识查询</p>
+            <h1>从已收录资料里，<br /><em>找到可核对的答案。</em></h1>
+            <p class="welcome-copy">可以问基金概念、产品条款、公司公告和财报。小灵只依据知识库回答，并给出资料名称、页码或章节，方便你对照原文。</p>
             <div class="suggestions" aria-label="示例问题">
-              <button type="button" data-prompt="介绍华为显示器 B3-241H 的主要功能">了解一款产品 <span>↗</span></button>
-              <button type="button" data-prompt="比较华为显示器 B3-241H 和 B3-242H 的不同之处">比较两款产品 <span>↗</span></button>
+              <button type="button" data-prompt="什么是基金净值？">什么是基金净值 <span>↗</span></button>
+              <button type="button" data-prompt="分析平安银行2026年一季度业绩">看一家公司的财报 <span>↗</span></button>
+              <button type="button" data-prompt="基金赎回通常多久到账？">赎回多久到账 <span>↗</span></button>
+              <button type="button" data-prompt="这个理财产品保证赚钱吗？">能不能保证赚钱 <span>↗</span></button>
             </div>
           </div>
           <div class="message-list" id="messageList" hidden></div>
@@ -57,15 +72,18 @@
           <div class="inline-error" id="inlineError" role="alert" hidden></div>
           <form class="composer" id="messageForm">
             <label class="sr-only" for="messageInput">输入问题</label>
-            <textarea id="messageInput" name="message" rows="1" maxlength="4000" placeholder="向小灵询问产品、功能或使用方法…" required></textarea>
+            <textarea id="messageInput" name="message" rows="1" maxlength="4000" placeholder="询问基金、理财、公告或财报…" required></textarea>
             <div class="composer-bottom">
+              <label class="web-toggle">
+                <input id="webSearch" type="checkbox" checked /> 联网搜索
+              </label>
               <span>Enter 发送 · Shift + Enter 换行</span>
               <button class="send-button" id="sendButton" type="submit" aria-label="发送消息" disabled>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-6 6m6-6 6 6" /></svg>
               </button>
             </div>
           </form>
-          <p class="composer-note">小灵根据现有资料回答；关键参数请核对原始文档。</p>
+          <p class="composer-note">回答依据已收录资料，不构成投资建议，也不承诺收益。数字和条款请核对引用来源。</p>
         </div>
       </main>
     </div>

@@ -95,27 +95,142 @@ function renderMessages() {
       label.textContent = "小灵";
       body.append(label);
     }
-    const content = document.createElement("p");
+    const content = document.createElement("div");
     content.className = "message-content";
-    const parts = String(message.content || "").split(/(https?:\/\/[^\s<>"']+)/g);
-    for (const part of parts) {
-      if (/^https?:\/\//.test(part)) {
-        const link = document.createElement("a");
-        link.href = part;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        link.textContent = part;
-        content.append(link);
-      } else {
-        content.append(document.createTextNode(part));
-      }
-    }
+    if (message.pending) renderProgress(content, message);
+    else renderAnswer(content, message.content);
     body.append(content);
+    renderCitations(body, message.citations);
     row.append(body);
     ui.messages.append(row);
   }
   renderConfirmation();
   ui.area.scrollTop = ui.area.scrollHeight;
+}
+
+function renderProgress(parent, message) {
+  const steps = message.steps?.length ? message.steps : [message.statusText || "正在处理…"];
+  const list = document.createElement("ol");
+  list.className = "progress-list";
+  steps.forEach((step, index) => {
+    const item = document.createElement("li");
+    item.className = index === steps.length - 1 ? "current" : "done";
+    item.textContent = step;
+    list.append(item);
+  });
+  parent.append(list);
+}
+
+function renderAnswer(parent, value) {
+  const normalized = String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\*\*([^*\n]+)\*\*/g, "\n\n§$1\n")
+    .replace(/^[ \t]*#{1,3}[ \t]+/gm, "§")
+    .replace(/([。！？])\s*-\s+/g, "$1\n- ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!normalized) return;
+  for (const block of normalized.split(/\n{2,}/)) {
+    const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    if (lines.length === 1 && lines[0].startsWith("§")) {
+      const heading = document.createElement("h3");
+      appendRichText(heading, lines[0].slice(1));
+      parent.append(heading);
+      continue;
+    }
+    if (lines.every((line) => line.startsWith("- ") || line.startsWith("§"))) {
+      let list = null;
+      for (const line of lines) {
+        if (line.startsWith("§")) {
+          const heading = document.createElement("h3");
+          appendRichText(heading, line.slice(1));
+          parent.append(heading);
+          list = null;
+          continue;
+        }
+        if (!list) {
+          list = document.createElement("ul");
+          parent.append(list);
+        }
+        const item = document.createElement("li");
+        appendRichText(item, line.slice(2));
+        list.append(item);
+      }
+      continue;
+    }
+    const paragraph = document.createElement("p");
+    appendRichText(paragraph, lines.join(""));
+    parent.append(paragraph);
+  }
+}
+
+function appendRichText(parent, value) {
+  const pieces = String(value || "").split(/(\[\d+\]|https?:\/\/[^\s<>"']+)/g);
+  for (const part of pieces) {
+    const mark = part.match(/^\[(\d+)\]$/);
+    if (mark) {
+      const link = document.createElement("a");
+      link.className = "cite-mark";
+      link.href = `#cite-${mark[1]}`;
+      link.textContent = part;
+      parent.append(link);
+    } else if (/^https?:\/\//.test(part)) {
+      const link = document.createElement("a");
+      link.href = part;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = part;
+      parent.append(link);
+    } else if (part) {
+      parent.append(document.createTextNode(part));
+    }
+  }
+}
+
+function renderCitations(parent, citations) {
+  if (!citations?.length) return;
+  const list = document.createElement("ol");
+  list.className = "citation-list";
+  for (const item of citations) {
+    const card = document.createElement("li");
+    card.className = "citation-card";
+    const index = item.index || citations.indexOf(item) + 1;
+    card.id = `cite-${index}`;
+    const title = document.createElement("strong");
+    const rawName = item.download_name || item.title || item.source_file || item.document_title || item.file_name || "资料";
+    const name = String(rawName).replace(/_new(?=\.[^.]+$)/, "").replace(/\.md$/i, "");
+    title.textContent = `[${index}] ${name}`;
+    card.append(title);
+    if (item.product_name) {
+      const product = document.createElement("p");
+      product.textContent = item.product_name;
+      card.append(product);
+    }
+    if (item.excerpt || item.source_span || item.content) {
+      const excerpt = document.createElement("p");
+      excerpt.textContent = item.excerpt || item.source_span || item.content;
+      card.append(excerpt);
+    }
+    if (item.download_url) {
+      const download = document.createElement("a");
+      download.href = item.download_url;
+      const saved = String(item.download_name || "").toLowerCase();
+      download.textContent = saved.endsWith(".doc") || saved.endsWith(".docx") ? "下载 Word" : "下载 PDF";
+      card.append(download);
+    }
+    if (item.url) {
+      const page = document.createElement("a");
+      page.href = item.url;
+      page.target = "_blank";
+      page.rel = "noopener noreferrer";
+      page.textContent = item.url;
+      card.append(document.createTextNode(" "));
+      card.append(page);
+    }
+    list.append(card);
+  }
+  parent.append(list);
 }
 
 function renderConfirmation() {
@@ -124,7 +239,8 @@ function renderConfirmation() {
   const panel = document.createElement("div");
   panel.className = "confirmation-panel";
   const heading = document.createElement("p");
-  heading.textContent = "请确认产品名称";
+  const business = confirmation.candidates.some((candidate) => candidate.entity_type);
+  heading.textContent = business ? "请确认查询对象" : "请确认产品名称";
   panel.append(heading);
   if (confirmation.candidates.length === 1) {
     const name = confirmation.candidates[0].itemname_question;
@@ -230,6 +346,33 @@ async function createConversation() {
   return conversation.conversation_id;
 }
 
+function webSearchEnabled() {
+  return document.querySelector("#webSearch")?.checked !== false;
+}
+
+async function readEvents(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() || "";
+    for (const block of blocks) {
+      if (!block.trim()) continue;
+      let event = "message";
+      const dataLines = [];
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+      }
+      if (dataLines.length) onEvent(event, JSON.parse(dataLines.join("\n")));
+    }
+  }
+}
+
 async function submitMessage(question, extra = {}) {
   if (!question || state.sending) return;
   showError("");
@@ -243,12 +386,42 @@ async function submitMessage(question, extra = {}) {
     ui.input.value = "";
     updateComposer();
     state.messages.push({ role: "user", content: question });
-    state.messages.push({ role: "assistant", content: "正在思考…", pending: true });
+    state.messages.push({
+      role: "assistant",
+      content: "",
+      statusText: "已收到问题，正在判断需要哪类资料。",
+      steps: ["已收到问题，正在判断需要哪类资料。"],
+      pending: true,
+      citations: [],
+    });
     state.pendingConfirmation = null;
     renderMessages();
-    await api(`/api/conversations/${id}/messages`, {
+    const response = await fetch(`/api/conversations/${id}/messages/stream`, {
       method: "POST",
-      body: JSON.stringify({ content: question, ...extra }),
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ content: question, web_search: webSearchEnabled(), ...extra }),
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({ error: `请求失败 (${response.status})` }));
+      throw new Error(result.error || `请求失败 (${response.status})`);
+    }
+    const draft = state.messages[state.messages.length - 1];
+    await readEvents(response, (event, data) => {
+      if (state.activeId !== id) return;
+      if (event === "status") {
+        draft.steps = draft.steps || [];
+        if (data.text && draft.steps.at(-1) !== data.text) draft.steps.push(data.text);
+        draft.statusText = data.text || "正在检索资料…";
+        draft.pending = !draft.content;
+      } else if (event === "answer_delta") {
+        draft.pending = false;
+        draft.content += data.text || "";
+      } else if (event === "citations") {
+        draft.citations = data.citations || [];
+      } else if (event === "error") {
+        throw new Error(data.message || "回答失败");
+      }
+      renderMessages();
     });
     if (state.activeId === id) await loadConversation(id);
     await refreshConversations();
@@ -285,6 +458,13 @@ document.querySelector("#newChat").addEventListener("click", async () => {
     showError(error.message);
   }
 });
+document.querySelector("#collapseSidebar").addEventListener("click", () => {
+  const shell = document.querySelector(".chat-shell");
+  const collapsed = shell.classList.toggle("sidebar-collapsed");
+  const button = document.querySelector("#collapseSidebar");
+  button.setAttribute("aria-expanded", String(!collapsed));
+  button.setAttribute("aria-label", collapsed ? "展开对话列表" : "收起对话列表");
+});
 document.querySelector("#openSidebar").addEventListener("click", () => setSidebar(true));
 document.querySelector("#closeSidebar").addEventListener("click", () => setSidebar(false));
 ui.scrim.addEventListener("click", () => setSidebar(false));
@@ -299,6 +479,45 @@ window.addEventListener("popstate", () => {
   const id = new URLSearchParams(location.search).get("id");
   selectConversation(id, { updateHistory: false });
 });
+
+document.querySelector("#openMemory").addEventListener("click", async () => {
+  const panel = document.querySelector("#memoryPanel");
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) await loadMemory();
+});
+document.querySelector("#memoryForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = document.querySelector("#memoryInput");
+  const text = input.value.trim();
+  if (!text) return;
+  try {
+    await api("/api/memory", { method: "POST", body: JSON.stringify({ text }) });
+    input.value = "";
+    await loadMemory();
+  } catch (error) {
+    showError(error.message);
+  }
+});
+
+async function loadMemory() {
+  const data = await api("/api/memory");
+  const list = document.querySelector("#memoryList");
+  list.replaceChildren();
+  for (const item of data.items || []) {
+    const row = document.createElement("li");
+    const text = document.createElement("span");
+    text.textContent = item.text;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "删除";
+    remove.addEventListener("click", async () => {
+      await api("/api/memory", { method: "DELETE", body: JSON.stringify({ text: item.text }) });
+      await loadMemory();
+    });
+    row.append(text, remove);
+    list.append(row);
+  }
+}
 
 (async () => {
   updateComposer();

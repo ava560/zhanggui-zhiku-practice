@@ -47,6 +47,8 @@ class FakeCollection:
                     row[key] = row.get(key, 0) + value
                 for key, value in changes.get("$set", {}).items():
                     row[key] = value
+                for key in changes.get("$unset", {}):
+                    row.pop(key, None)
                 return dict(row)
         return None
 

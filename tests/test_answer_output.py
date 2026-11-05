@@ -207,7 +207,10 @@ class AnswerOutputTests(TestCase):
             patch.dict(os.environ, self.mongo_env),
             patch("pymongo.MongoClient", return_value=self.client),
             patch.object(Path, "read_text", return_value=payload),
-            patch("search.node_answer_output.generate_answer", side_effect=lambda _q, _r, chunks: (chunks[0]["content"], [])),
+            patch(
+                "search.node_answer_output.generate_answer",
+                side_effect=lambda _q, _r, chunks, related_files=None: (chunks[0]["content"], []),
+            ),
         ):
             result = node(self.state)
 
