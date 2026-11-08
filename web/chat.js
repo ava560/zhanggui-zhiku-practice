@@ -6,6 +6,8 @@ const state = {
   sending: false,
   sendingId: null,
   loadToken: 0,
+  skillId: "",
+  editingSkillId: "",
 };
 
 const ui = {
@@ -59,16 +61,49 @@ function renderConversations() {
     return;
   }
   for (const conversation of state.conversations) {
-    const item = document.createElement("button");
-    item.type = "button";
+    const item = document.createElement("div");
     item.className = `conversation-item${conversation.conversation_id === state.activeId ? " active" : ""}`;
-    item.setAttribute("aria-current", conversation.conversation_id === state.activeId ? "page" : "false");
-    item.title = conversation.title;
-    const label = document.createElement("span");
-    label.textContent = conversation.title;
-    item.append(label);
-    item.addEventListener("click", () => selectConversation(conversation.conversation_id));
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "conversation-open";
+    open.title = conversation.title;
+    open.setAttribute("aria-current", conversation.conversation_id === state.activeId ? "page" : "false");
+    open.textContent = conversation.title;
+    open.addEventListener("click", () => selectConversation(conversation.conversation_id));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "conversation-delete";
+    remove.textContent = "删除";
+    remove.setAttribute("aria-label", `删除${conversation.title}`);
+    remove.addEventListener("click", () => removeConversation(conversation.conversation_id));
+    item.append(open, remove);
     ui.list.append(item);
+  }
+}
+
+async function removeConversation(id) {
+  try {
+    await api(`/api/conversations/${id}`, { method: "DELETE" });
+    state.conversations = state.conversations.filter((item) => item.conversation_id !== id);
+    if (state.activeId !== id) {
+      renderConversations();
+      return;
+    }
+    state.activeId = null;
+    state.messages = [];
+    state.pendingConfirmation = null;
+    showDesk("");
+    const next = state.conversations[0];
+    if (next) {
+      await selectConversation(next.conversation_id);
+      return;
+    }
+    updateUrl("", true);
+    ui.title.textContent = "新对话";
+    renderConversations();
+    renderMessages();
+  } catch (error) {
+    showError(error.message);
   }
 }
 
@@ -98,7 +133,7 @@ function renderMessages() {
     const content = document.createElement("div");
     content.className = "message-content";
     if (message.pending) renderProgress(content, message);
-    else renderAnswer(content, message.content);
+    else renderAnswer(content, message.content, message.role);
     body.append(content);
     renderCitations(body, message.citations);
     row.append(body);
@@ -121,34 +156,21 @@ function renderProgress(parent, message) {
   parent.append(list);
 }
 
-function renderAnswer(parent, value) {
-  const normalized = String(value || "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\*\*([^*\n]+)\*\*/g, "\n\n§$1\n")
-    .replace(/^[ \t]*#{1,3}[ \t]+/gm, "§")
-    .replace(/([。！？])\s*-\s+/g, "$1\n- ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+function renderAnswer(parent, value, role) {
+  const normalized = role === "assistant" ? structureAnswer(value) : String(value || "").replace(/\r\n/g, "\n").trim();
   if (!normalized) return;
   for (const block of normalized.split(/\n{2,}/)) {
     const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
-    if (!lines.length) continue;
-    if (lines.length === 1 && lines[0].startsWith("§")) {
-      const heading = document.createElement("h3");
-      appendRichText(heading, lines[0].slice(1));
-      parent.append(heading);
-      continue;
-    }
-    if (lines.every((line) => line.startsWith("- ") || line.startsWith("§"))) {
-      let list = null;
-      for (const line of lines) {
-        if (line.startsWith("§")) {
-          const heading = document.createElement("h3");
-          appendRichText(heading, line.slice(1));
-          parent.append(heading);
-          list = null;
-          continue;
-        }
+    let list = null;
+    lines.forEach((line, index) => {
+      if (role === "assistant" && (line.startsWith("§") || (index === 0 && lines.length > 1 && isAnswerHeading(line)) || (lines.length === 1 && isAnswerHeading(line)))) {
+        list = null;
+        const heading = document.createElement("h3");
+        appendRichText(heading, line.replace(/^§/, ""));
+        parent.append(heading);
+        return;
+      }
+      if (line.startsWith("- ")) {
         if (!list) {
           list = document.createElement("ul");
           parent.append(list);
@@ -156,13 +178,57 @@ function renderAnswer(parent, value) {
         const item = document.createElement("li");
         appendRichText(item, line.slice(2));
         list.append(item);
+        return;
       }
+      list = null;
+      for (const sentence of role === "assistant" ? answerSentences(line) : [line]) {
+        const paragraph = document.createElement("p");
+        appendRichText(paragraph, sentence);
+        parent.append(paragraph);
+      }
+    });
+  }
+}
+
+function answerSentences(text) {
+  const parts = String(text || "").match(/[^。！？]+[。！？]|[^。！？]+$/g) || [];
+  const merged = [];
+  for (const raw of parts) {
+    const part = raw.trim();
+    if (!part) continue;
+    const cited = part.match(/^((?:\[\d+\])+)([\s\S]*)$/);
+    if (cited && merged.length) {
+      merged[merged.length - 1] += cited[1];
+      const rest = cited[2].trim();
+      if (rest) merged.push(rest);
       continue;
     }
-    const paragraph = document.createElement("p");
-    appendRichText(paragraph, lines.join(""));
-    parent.append(paragraph);
+    if (merged.length && part.length < 8 && !"。！？".includes(part.slice(-1))) {
+      merged[merged.length - 1] += part;
+      continue;
+    }
+    merged.push(part);
   }
+  return merged.length ? merged : [text];
+}
+
+function structureAnswer(value) {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\*\*([^*\n]+)\*\*/g, "\n\n§$1\n")
+    .replace(/^[ \t]*#{1,3}[ \t]+/gm, "§")
+    .replace(/([。！？])\s*-\s+/g, "$1\n- ")
+    .replace(/^先给结论[：:]\s*/, "§结论\n")
+    .replace(/(以下按[^。\n]{0,24}。)/g, "\n\n$1\n\n")
+    .replace(/(?<!^)(?<!\n)([一二三四五六七八九十]{1,3})、/g, "\n\n$1、")
+    .replace(/^([一二三四五六七八九十]{1,3})、([^：:\n]{1,20})[：:]\s*/gm, "§$2\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function isAnswerHeading(line) {
+  const text = line.replace(/^§/, "");
+  return text.length > 0 && text.length <= 20 && !/[。！？]$/.test(text) && !text.startsWith("- ");
 }
 
 function appendRichText(parent, value) {
@@ -399,7 +465,7 @@ async function submitMessage(question, extra = {}) {
     const response = await fetch(`/api/conversations/${id}/messages/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ content: question, web_search: webSearchEnabled(), ...extra }),
+      body: JSON.stringify({ content: question, web_search: webSearchEnabled(), skill_id: state.skillId, ...extra }),
     });
     if (!response.ok) {
       const result = await response.json().catch(() => ({ error: `请求失败 (${response.status})` }));
@@ -484,18 +550,39 @@ window.addEventListener("popstate", () => {
 const jobStatus = { never: "尚未运行", running: "运行中", succeeded: "成功", failed: "失败" };
 let jobCatalog = { jobs: [], codes: [], documents: [], openId: null, preview: "" };
 
-function showJobs(open) {
-  document.querySelector("#jobsView").hidden = !open;
+function showDesk(which) {
+  const desks = {
+    jobs: ["定时任务", "小灵 / 定时任务"],
+    skills: ["技能", "小灵 / 技能"],
+    memory: ["个性化", "小灵 / 个性化"],
+    database: ["数据库", "小灵 / 数据库"],
+  };
+  for (const name of Object.keys(desks)) {
+    document.querySelector(`#${name}View`).hidden = name !== which;
+  }
+  const open = Boolean(desks[which]);
   ui.area.hidden = open;
   document.querySelector(".composer-wrap").hidden = open;
-  document.querySelector("#openJobs").classList.toggle("is-active", open);
-  document.querySelector(".current-chat-label").textContent = open ? "小灵 / 每日任务" : "小灵 / 金融知识";
+  document.querySelector("#openJobs").classList.toggle("is-active", which === "jobs");
+  document.querySelector("#openSkills").classList.toggle("is-active", which === "skills");
+  document.querySelector("#newChat").classList.toggle("is-active", !open);
+  document.querySelector("#userMenu").hidden = true;
+  document.querySelector("#openUserMenu").setAttribute("aria-expanded", "false");
   if (open) {
-    ui.title.textContent = "定时任务";
-    loadJobs().catch((error) => showError(error.message));
+    ui.title.textContent = desks[which][0];
+    document.querySelector(".current-chat-label").textContent = desks[which][1];
+    if (which === "jobs") loadJobs().catch((error) => showError(error.message));
+    if (which === "skills") renderSkills();
+    if (which === "memory") loadMemory().catch((error) => showError(error.message));
+    if (which === "database") loadDatabase().catch((error) => showError(error.message));
   } else {
+    document.querySelector(".current-chat-label").textContent = "小灵 / 金融知识";
     ui.title.textContent = state.conversations.find((item) => item.conversation_id === state.activeId)?.title || "新对话";
   }
+}
+
+function showJobs(open) {
+  showDesk(open ? "jobs" : "");
 }
 
 document.querySelector("#openJobs").addEventListener("click", () => {
@@ -519,7 +606,10 @@ document.querySelector("#jobForm").addEventListener("submit", async (event) => {
         sop_ref: document.querySelector("#jobSop").value.trim(),
         description: document.querySelector("#jobDescription").value.trim(),
         code_id: document.querySelector("#jobCode").value,
+        skill_id: document.querySelector("#jobSkill").value,
         run_at: document.querySelector("#jobRunAt").value.trim(),
+        schedule_kind: document.querySelector("#jobCadence").value,
+        schedule_day: document.querySelector("#jobCadence").value === "daily" ? null : Number(document.querySelector("#jobDay").value),
         doc_ids: docIds,
       }),
     });
@@ -542,9 +632,12 @@ function fillJobDialog() {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.value = doc.doc_id;
-    label.append(input, document.createTextNode(` ${doc.source_file} · ${doc.status}`));
+    const text = document.createElement("span");
+    text.textContent = `${doc.source_file} · ${doc.status}`;
+    label.append(input, text);
     docs.append(label);
   }
+  fillDayOptions();
   const code = document.querySelector("#jobCode");
   code.replaceChildren();
   const empty = document.createElement("option");
@@ -554,9 +647,55 @@ function fillJobDialog() {
   for (const item of jobCatalog.codes) {
     const option = document.createElement("option");
     option.value = item.code_id;
-    option.textContent = item.code_id;
+    option.textContent = item.name || item.code_id;
     code.append(option);
   }
+  const skill = document.querySelector("#jobSkill");
+  skill.replaceChildren();
+  const noSkill = document.createElement("option");
+  noSkill.value = "";
+  noSkill.textContent = "不使用技能";
+  skill.append(noSkill);
+  for (const item of jobCatalog.skills || []) {
+    const option = document.createElement("option");
+    option.value = item.skill_id;
+    option.textContent = item.name;
+    skill.append(option);
+  }
+  if (state.skillId) skill.value = state.skillId;
+}
+
+function fillDayOptions() {
+  const cadence = document.querySelector("#jobCadence").value;
+  const label = document.querySelector("#jobDayLabel");
+  const day = document.querySelector("#jobDay");
+  label.hidden = cadence === "daily";
+  day.replaceChildren();
+  if (cadence === "weekly") {
+    ["周一", "周二", "周三", "周四", "周五", "周六", "周日"].forEach((name, index) => {
+      const option = document.createElement("option");
+      option.value = String(index + 1);
+      option.textContent = name;
+      day.append(option);
+    });
+  }
+  if (cadence === "monthly") {
+    for (let number = 1; number <= 31; number += 1) {
+      const option = document.createElement("option");
+      option.value = String(number);
+      option.textContent = `${number}日`;
+      day.append(option);
+    }
+  }
+}
+
+function scheduleText(job) {
+  if (job.schedule_kind === "weekly") {
+    const names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+    return `每${names[(job.schedule_day || 1) - 1]} ${job.run_at}`;
+  }
+  if (job.schedule_kind === "monthly") return `每月${job.schedule_day}日 ${job.run_at}`;
+  return `每天 ${job.run_at}`;
 }
 
 async function loadJobs() {
@@ -589,7 +728,7 @@ async function loadJobs() {
     title.append(pill);
     const meta = document.createElement("p");
     meta.className = "job-meta";
-    meta.textContent = `${job.sop_ref} · 每天 ${job.run_at} · 代码 ${job.code_id || "未指定"}`;
+    meta.textContent = `${job.sop_ref} · ${scheduleText(job)} · 代码 ${job.code_id || "未指定"}`;
     const actions = document.createElement("div");
     actions.className = "chip-row";
     const open = document.createElement("button");
@@ -634,12 +773,14 @@ async function renderJobDetail(jobId) {
     jobCatalog.preview = "";
     loadJobs().catch((error) => showError(error.message));
   });
+  const heading = document.createElement("div");
+  heading.className = "detail-title";
   const title = document.createElement("h2");
   title.textContent = job.name;
   const pill = document.createElement("span");
   pill.className = "status-pill";
   pill.textContent = jobStatus[job.last_status] || job.last_status;
-  title.append(pill);
+  heading.append(title, pill);
   const grid = document.createElement("div");
   grid.className = "detail-grid";
   const description = document.createElement("label");
@@ -648,8 +789,48 @@ async function renderJobDetail(jobId) {
   descriptionInput.maxLength = 200;
   descriptionInput.value = job.description || "";
   description.append(descriptionInput);
+  const cadence = document.createElement("label");
+  cadence.append(document.createTextNode("重复"));
+  const cadenceInput = document.createElement("select");
+  [["daily", "每天"], ["weekly", "每周"], ["monthly", "每月"]].forEach(([value, text]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    option.selected = (job.schedule_kind || "daily") === value;
+    cadenceInput.append(option);
+  });
+  cadence.append(cadenceInput);
+  const day = document.createElement("label");
+  day.append(document.createTextNode("日期"));
+  const dayInput = document.createElement("select");
+  day.append(dayInput);
+  const fillDetailDay = () => {
+    day.hidden = cadenceInput.value === "daily";
+    dayInput.replaceChildren();
+    const selected = String(job.schedule_day || 1);
+    if (cadenceInput.value === "weekly") {
+      ["周一", "周二", "周三", "周四", "周五", "周六", "周日"].forEach((name, index) => {
+        const option = document.createElement("option");
+        option.value = String(index + 1);
+        option.textContent = name;
+        option.selected = option.value === selected;
+        dayInput.append(option);
+      });
+    }
+    if (cadenceInput.value === "monthly") {
+      for (let number = 1; number <= 31; number += 1) {
+        const option = document.createElement("option");
+        option.value = String(number);
+        option.textContent = `${number}日`;
+        option.selected = option.value === selected;
+        dayInput.append(option);
+      }
+    }
+  };
+  cadenceInput.addEventListener("change", fillDetailDay);
+  fillDetailDay();
   const time = document.createElement("label");
-  time.append(document.createTextNode("每天运行"));
+  time.append(document.createTextNode("运行时刻"));
   const timeInput = document.createElement("input");
   timeInput.type = "time";
   timeInput.value = job.run_at;
@@ -661,11 +842,16 @@ async function renderJobDetail(jobId) {
   save.addEventListener("click", async () => {
     await api(`/api/data-jobs/${job.job_id}`, {
       method: "PATCH",
-      body: JSON.stringify({ description: descriptionInput.value.trim(), run_at: timeInput.value }),
+      body: JSON.stringify({
+        description: descriptionInput.value.trim(),
+        run_at: timeInput.value,
+        schedule_kind: cadenceInput.value,
+        schedule_day: cadenceInput.value === "daily" ? null : Number(dayInput.value),
+      }),
     });
     await loadJobs();
   });
-  grid.append(description, time);
+  grid.append(description, cadence, day, time);
   const files = document.createElement("div");
   const filesLabel = document.createElement("p");
   filesLabel.textContent = "涉及文件";
@@ -694,6 +880,22 @@ async function renderJobDetail(jobId) {
     renderJobDetail(jobId).catch((error) => showError(error.message));
   });
   codeWrap.append(codeChip);
+  const tryRun = document.createElement("button");
+  tryRun.type = "button";
+  tryRun.className = "desk-solid";
+  tryRun.textContent = "试运行";
+  tryRun.addEventListener("click", async () => {
+    tryRun.disabled = true;
+    tryRun.textContent = "正在试运行";
+    try {
+      await api(`/api/data-jobs/${job.job_id}/run`, { method: "POST" });
+      await renderJobDetail(jobId);
+    } catch (error) {
+      showError(error.message);
+      tryRun.disabled = false;
+      tryRun.textContent = "试运行";
+    }
+  });
   const preview = document.createElement("div");
   preview.className = "preview";
   if (jobCatalog.preview.startsWith("file:")) {
@@ -705,7 +907,13 @@ async function renderJobDetail(jobId) {
     block.textContent = job.code_registered ? job.code_preview : "代码未登记，不会运行";
     preview.append(block);
   }
-  detail.append(back, title, grid, save, files, codeWrap, preview);
+  detail.append(back, heading, grid, save, files, codeWrap, tryRun, preview);
+  if (job.last_error) {
+    const error = document.createElement("p");
+    error.className = "job-error";
+    error.textContent = job.last_error;
+    detail.append(error);
+  }
 }
 
 function renderFilePreview(file) {
@@ -747,10 +955,17 @@ function renderFilePreview(file) {
   return wrap;
 }
 
-document.querySelector("#openMemory").addEventListener("click", async () => {
-  const panel = document.querySelector("#memoryPanel");
-  panel.hidden = !panel.hidden;
-  if (!panel.hidden) await loadMemory();
+document.querySelector("#brandHome").addEventListener("click", () => showDesk(""));
+document.querySelector("#openUserMenu").addEventListener("click", () => {
+  const menu = document.querySelector("#userMenu");
+  menu.hidden = !menu.hidden;
+  document.querySelector("#openUserMenu").setAttribute("aria-expanded", String(!menu.hidden));
+});
+document.querySelectorAll("#userMenu [data-view]").forEach((button) => {
+  button.addEventListener("click", () => {
+    showDesk(button.dataset.view);
+    setSidebar(false);
+  });
 });
 document.querySelector("#memoryForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -783,6 +998,143 @@ async function loadMemory() {
     });
     row.append(text, remove);
     list.append(row);
+  }
+}
+
+document.querySelector("#jobCadence").addEventListener("change", fillDayOptions);
+document.querySelector("#openSkills").addEventListener("click", () => {
+  const opening = document.querySelector("#skillsView").hidden;
+  showDesk(opening ? "skills" : "");
+  if (opening) setSidebar(false);
+});
+document.querySelector("#skillChip").addEventListener("click", () => {
+  state.skillId = "";
+  document.querySelector("#skillChip").hidden = true;
+});
+document.querySelector("#openSkillDialog").addEventListener("click", () => openSkillDialog());
+document.querySelector("#cancelSkill").addEventListener("click", () => document.querySelector("#skillDialog").close());
+document.querySelector("#skillForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const body = {
+    name: document.querySelector("#skillName").value.trim(),
+    summary: document.querySelector("#skillSummary").value.trim(),
+    instructions: document.querySelector("#skillInstructions").value.trim(),
+    code_id: document.querySelector("#skillCode").value,
+  };
+  try {
+    const path = state.editingSkillId ? `/api/skills/${state.editingSkillId}` : "/api/skills";
+    await api(path, { method: state.editingSkillId ? "PATCH" : "POST", body: JSON.stringify(body) });
+    document.querySelector("#skillDialog").close();
+    state.editingSkillId = "";
+    renderSkills();
+  } catch (error) {
+    showError(error.message);
+  }
+});
+
+function useSkill(skill) {
+  state.skillId = skill.skill_id;
+  const chip = document.querySelector("#skillChip");
+  chip.hidden = false;
+  chip.textContent = `技能：${skill.name} · 取消`;
+  showDesk("");
+}
+
+async function openSkillDialog(skill) {
+  state.editingSkillId = skill?.skill_id || "";
+  document.querySelector("#skillDialogTitle").textContent = skill ? "修改技能" : "新建技能";
+  document.querySelector("#skillName").value = skill?.name || "";
+  document.querySelector("#skillSummary").value = skill?.summary || "";
+  document.querySelector("#skillInstructions").value = skill?.instructions || "";
+  const select = document.querySelector("#skillCode");
+  select.replaceChildren();
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "不绑定代码";
+  select.append(none);
+  try {
+    const data = await api("/api/data-jobs");
+    for (const item of data.codes || []) {
+      const option = document.createElement("option");
+      option.value = item.code_id;
+      option.textContent = item.name || item.code_id;
+      option.selected = item.code_id === skill?.code_id;
+      select.append(option);
+    }
+  } catch (error) {
+    showError(error.message);
+  }
+  document.querySelector("#skillDialog").showModal();
+}
+
+function renderSkills() {
+  api("/api/skills").then((data) => {
+    const list = document.querySelector("#skillList");
+    list.replaceChildren();
+    const skills = data.skills || [];
+    if (!skills.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-note";
+      empty.textContent = "还没有自己的技能。新建一条，写下名称和做法。";
+      list.append(empty);
+      return;
+    }
+    for (const skill of skills) {
+      const card = document.createElement("article");
+      card.className = "plain-card static";
+      const name = document.createElement("strong");
+      name.textContent = skill.name;
+      const summary = document.createElement("small");
+      summary.textContent = skill.summary || skill.instructions;
+      const actions = document.createElement("div");
+      actions.className = "card-actions";
+      const use = document.createElement("button");
+      use.type = "button";
+      use.textContent = "用于这次对话";
+      use.addEventListener("click", () => useSkill(skill));
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.textContent = "修改";
+      edit.addEventListener("click", () => openSkillDialog(skill));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "删除";
+      remove.addEventListener("click", async () => {
+        await api(`/api/skills/${skill.skill_id}`, { method: "DELETE" });
+        if (state.skillId === skill.skill_id) {
+          state.skillId = "";
+          document.querySelector("#skillChip").hidden = true;
+        }
+        renderSkills();
+      });
+      actions.append(use, edit, remove);
+      card.append(name, summary, actions);
+      list.append(card);
+    }
+  }).catch((error) => showError(error.message));
+}
+
+async function loadDatabase() {
+  const data = await api("/api/table-imports");
+  const list = document.querySelector("#databaseList");
+  list.replaceChildren();
+  const tables = (data.tables || []).filter((item) => item.table_name);
+  if (!tables.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = "还没有已发布的表。";
+    list.append(empty);
+    return;
+  }
+  for (const table of tables) {
+    const card = document.createElement("article");
+    card.className = "plain-card static";
+    const name = document.createElement("strong");
+    name.textContent = table.source_file;
+    const summary = document.createElement("small");
+    summary.textContent = table.table_summary || "已发布";
+    card.append(name, summary);
+    list.append(card);
   }
 }
 

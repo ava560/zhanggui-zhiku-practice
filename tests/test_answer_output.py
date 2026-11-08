@@ -54,6 +54,9 @@ class AnswerOutputTests(TestCase):
         prompt = post.call_args.kwargs["json"]["messages"][-1]["content"]
         self.assertEqual(answer, "产品 A 的说明")
         self.assertIn("产品 A 的资料", prompt)
+        self.assertIn("最近十条", prompt)
+        self.assertIn("会话记忆", prompt)
+        self.assertIn("长期记忆", prompt)
         self.assertNotIn("74321", prompt)
         self.assertNotIn("0.912345", prompt)
         self.assertNotIn("source_ranks", prompt)
@@ -209,7 +212,7 @@ class AnswerOutputTests(TestCase):
             patch.object(Path, "read_text", return_value=payload),
             patch(
                 "search.node_answer_output.generate_answer",
-                side_effect=lambda _q, _r, chunks, related_files=None: (chunks[0]["content"], []),
+                side_effect=lambda _q, _r, chunks, related_files=None, **_context: (chunks[0]["content"], []),
             ),
         ):
             result = node(self.state)

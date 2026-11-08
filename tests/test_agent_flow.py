@@ -389,6 +389,46 @@ class AgentWorkflowTests(TestCase):
         self.assertIn("分类失败", failed["final_answer"])
         self.assertEqual(failed["evidence_status"], "retrieval_error")
 
+    def test_empty_retrieval_still_gives_history_to_the_answer_model(self):
+        seen = {}
+
+        def answerer(state, chunks, _gaps, _web_error):
+            seen["chunks"] = chunks
+            seen["history"] = state.get("conversation_history")
+            seen["memory"] = state.get("session_memory")
+            seen["long_term"] = state.get("long_term_memory")
+            return "沿用刚才的对话：业绩基准是中证消费指数收益率。"
+
+        ports = _ports(
+            search_direct=lambda _question: [],
+            search_hyde=lambda _question, _names: [],
+            search_web=lambda _question: [],
+        )
+        book = LongTermMemoryBook()
+        book.add("u-history", "只用已发布的表", "user_explicit")
+        answered = run_agent_workflow(
+            {
+                "current_question": "000001.OF的业绩基准是谁？",
+                "user_id": "u-history",
+                "extracted_names": [],
+                "use_web_search": False,
+                "conversation_history": [
+                    {"role": "user", "content": "000001.OF的业绩基准是谁？"},
+                    {"role": "assistant", "content": "业绩基准是中证消费指数收益率。"},
+                ],
+                "session_memory": {"主体": "000001.OF"},
+            },
+            llm=lambda _prompt: '{"intent":"simple"}',
+            ports=ports,
+            memory=book,
+            answerer=answerer,
+        )
+        self.assertEqual(seen["chunks"], [])
+        self.assertEqual(seen["history"][1]["content"], "业绩基准是中证消费指数收益率。")
+        self.assertEqual(seen["memory"]["主体"], "000001.OF")
+        self.assertEqual(seen["long_term"], ["只用已发布的表"])
+        self.assertIn("沿用刚才的对话", answered["final_answer"])
+
 
 class WebSearchSwitchTests(TestCase):
     def test_shared_query_skips_web_when_the_user_turns_it_off(self):
@@ -420,6 +460,20 @@ class WebSearchSwitchTests(TestCase):
         self.assertEqual(citations[0]["download_url"], "/api/sources/download?name=术语.md")
         self.assertEqual(citations[1]["url"], "https://example.com/nav")
         self.assertIn("净值说明", citations[1]["title"])
+
+    def test_unused_files_are_not_attached_as_citations(self):
+        from search.citations import annotate_answer
+
+        answer, citations = annotate_answer(
+            "000001.OF的业绩基准是中证消费指数收益率。",
+            [
+                {"file_name": "mock_benchmarks.csv", "content": "基金代码 000001.OF 主要业绩基准 中证消费指数收益率"},
+                {"file_name": "基金基础知识.pdf", "content": "投资者教育手册，说明风险评级和适当性管理。"},
+            ],
+        )
+        self.assertEqual([item["source_file"] for item in citations], ["mock_benchmarks.csv"])
+        self.assertIn("[1]", answer)
+        self.assertNotIn("[2]", answer)
 
     def test_progress_names_each_stage_and_skips_web_when_turned_off(self):
         notes = []

@@ -12,33 +12,40 @@
     <div class="chat-shell">
       <aside class="sidebar" id="sidebar" aria-label="对话导航">
         <div class="sidebar-top">
-          <a class="brand" href="/chat" aria-label="灵库对话首页">
-            <span class="brand-symbol" aria-hidden="true">灵</span>
-            <span class="brand-copy"><strong>灵库</strong><small>LINGKU · KNOWLEDGE</small></span>
-          </a>
+          <button class="brand" id="brandHome" type="button">
+            灵库
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
+          </button>
           <button class="icon-button mobile-close" id="closeSidebar" type="button" aria-label="关闭菜单">×</button>
         </div>
-        <button class="new-chat" id="newChat" type="button">
-          <span class="new-chat-icon" aria-hidden="true">＋</span><span>新建对话</span>
-        </button>
-        <div class="history-heading"><span>最近对话</span><span id="conversationCount">0</span></div>
+        <nav class="nav" aria-label="功能">
+          <button class="nav-item" id="newChat" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            新建对话
+          </button>
+          <button class="nav-item" id="openJobs" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 8v5l3 2" /></svg>
+            定时任务
+          </button>
+          <button class="nav-item" id="openSkills" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5h5l-4 3 2 5-5-3-5 3 2-5-4-3h5z" /></svg>
+            技能
+          </button>
+        </nav>
+        <p class="side-label">最近 <span id="conversationCount">0</span></p>
         <nav class="conversation-list" id="conversationList" aria-label="历史对话">
           <p class="sidebar-empty">还没有对话记录</p>
         </nav>
-        <div class="memory-panel" id="memoryPanel" hidden>
-          <p class="memory-title">个性化 · 长期记忆</p>
-          <form id="memoryForm">
-            <label class="sr-only" for="memoryInput">要记住的内容</label>
-            <input id="memoryInput" maxlength="200" placeholder="写下要记住的偏好" />
-            <button type="submit">保存</button>
-          </form>
-          <ul id="memoryList"></ul>
-        </div>
-        <div class="sidebar-bottom">
-          <button class="sidebar-tool" id="openJobs" type="button">定时任务</button>
-          <button class="sidebar-tool" id="openMemory" type="button">个性化</button>
-          <a href="/" class="upload-link"><span aria-hidden="true">↗</span> 文档入库</a>
-          <span class="sidebar-caption">每段对话独立保存</span>
+        <div class="user-wrap">
+          <div class="user-menu" id="userMenu" hidden>
+            <button type="button" data-view="memory">个性化</button>
+            <a href="/">上传文件</a>
+            <button type="button" data-view="database">数据库</button>
+          </div>
+          <button class="sidebar-user" id="openUserMenu" type="button" aria-expanded="false" aria-controls="userMenu">
+            <span class="avatar" aria-hidden="true">灵</span>
+            <span class="user-copy"><strong>数据台</strong><small>已发布的表</small></span>
+          </button>
         </div>
       </aside>
 
@@ -58,12 +65,46 @@
             <div class="desk-head">
               <div>
                 <h1>定时任务</h1>
-                <p>按 SOP 每天运行已经指定的代码。钟点只保存，对话不会运行这些代码。</p>
+                <p>按每天、每周或每月运行已经指定的代码。钟点只保存，到点不会自动跑，对话也不会运行这些代码。</p>
               </div>
               <button class="desk-solid" id="openJobDialog" type="button">设置任务</button>
             </div>
             <div class="job-list" id="jobList" aria-live="polite"></div>
             <article class="job-detail" id="jobDetail" hidden></article>
+          </div>
+        </section>
+
+        <section class="desk-view" id="skillsView" hidden>
+          <div class="desk-panel">
+            <div class="desk-head">
+              <div>
+                <h1>技能</h1>
+                <p>自己写下名称和做法。选用后，这次对话按这个做法回答。对话里不会执行代码。</p>
+              </div>
+              <button class="desk-solid" id="openSkillDialog" type="button">新建技能</button>
+            </div>
+            <div class="card-grid" id="skillList"></div>
+          </div>
+        </section>
+
+        <section class="desk-view" id="memoryView" hidden>
+          <div class="desk-panel">
+            <h1>个性化</h1>
+            <p class="lead">长期记忆只保存你在这里写下的内容。普通提问不会自动记住。</p>
+            <form class="memory-form" id="memoryForm">
+              <label class="sr-only" for="memoryInput">要记住的内容</label>
+              <input id="memoryInput" maxlength="200" placeholder="写下要记住的偏好" />
+              <button class="desk-solid" type="submit">保存</button>
+            </form>
+            <ul class="memory-list" id="memoryList"></ul>
+          </div>
+        </section>
+
+        <section class="desk-view" id="databaseView" hidden>
+          <div class="desk-panel">
+            <h1>数据库</h1>
+            <p class="lead">这里是已发布的表。</p>
+            <div class="card-grid" id="databaseList"></div>
           </div>
         </section>
 
@@ -92,6 +133,7 @@
               <label class="web-toggle">
                 <input id="webSearch" type="checkbox" checked /> 联网搜索
               </label>
+              <button class="skill-chip" id="skillChip" type="button" hidden></button>
               <span>Enter 发送 · Shift + Enter 换行</span>
               <button class="send-button" id="sendButton" type="submit" aria-label="发送消息" disabled>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-6 6m6-6 6 6" /></svg>
@@ -104,20 +146,37 @@
     </div>
     <dialog class="job-dialog" id="jobDialog" aria-labelledby="jobDialogTitle">
       <form id="jobForm">
-        <h2 id="jobDialogTitle">设置每日任务</h2>
-        <p class="dialog-copy">一条任务绑定 SOP 标识和已登记的代码。不指定代码时任务会保存，但不会运行。这里不能填写代码正文或脚本路径。</p>
+        <h2 id="jobDialogTitle">设置任务</h2>
+        <p class="dialog-copy">一条任务绑定 SOP 标识、周期和已登记的代码或技能。不指定代码时任务会保存，但不会运行。这里不能填写代码正文或脚本路径。</p>
         <label>任务名称 <input id="jobName" name="name" maxlength="80" required /></label>
         <label>SOP 标识 <input id="jobSop" name="sop" maxlength="80" required /></label>
         <label>任务描述 <textarea id="jobDescription" name="description" maxlength="200"></textarea></label>
-        <label>每天运行 <input id="jobRunAt" name="runAt" type="time" value="09:00" required /></label>
+        <label>重复 <select id="jobCadence" name="cadence"><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label>
+        <label id="jobDayLabel" hidden>日期 <select id="jobDay" name="day"></select></label>
+        <label>运行时刻 <input id="jobRunAt" name="runAt" type="time" value="09:00" required /></label>
         <fieldset class="file-picks">
           <legend>涉及文件</legend>
           <div id="jobDocs"></div>
         </fieldset>
         <label>指定代码 <select id="jobCode" name="code"></select></label>
+        <label>技能 <select id="jobSkill" name="skill"></select></label>
         <div class="dialog-actions">
           <button class="desk-ghost" id="cancelJob" type="button">取消</button>
           <button class="desk-solid" type="submit">保存任务</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog class="job-dialog" id="skillDialog" aria-labelledby="skillDialogTitle">
+      <form id="skillForm">
+        <h2 id="skillDialogTitle">新建技能</h2>
+        <p class="dialog-copy">做法会写进这次回答。代码标识只给定时任务选用，对话里不会执行。</p>
+        <label>名称 <input id="skillName" name="name" maxlength="80" required /></label>
+        <label>简短说明 <input id="skillSummary" name="summary" maxlength="200" placeholder="卡片上显示的一句话" /></label>
+        <label>做法 <textarea id="skillInstructions" name="instructions" maxlength="4000" required placeholder="回答时要遵守的步骤"></textarea></label>
+        <label>定时任务代码 <select id="skillCode" name="code"></select></label>
+        <div class="dialog-actions">
+          <button class="desk-ghost" id="cancelSkill" type="button">取消</button>
+          <button class="desk-solid" type="submit">保存技能</button>
         </div>
       </form>
     </dialog>

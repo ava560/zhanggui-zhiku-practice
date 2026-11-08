@@ -81,23 +81,19 @@ def annotate_answer(answer: str, chunks: list[dict], download_for=None) -> tuple
         return text, citations
 
     sentences = [part for part in _SENTENCE.findall(text) if part] or [text]
-    used: set[int] = set()
+    ordered: list[dict] = []
     rebuilt: list[str] = []
     for sentence in sentences:
         marks = []
         for item in citations:
-            index = int(item["index"])
-            if index in used:
+            if item in ordered or not _sentence_cites(sentence, item):
                 continue
-            if _sentence_cites(sentence, item):
-                marks.append(index)
-                used.add(index)
+            ordered.append(item)
+            marks.append(len(ordered))
         rebuilt.append(sentence.rstrip() + "".join(f"[{index}]" for index in marks))
-    body = "".join(rebuilt).rstrip()
-    missing = [int(item["index"]) for item in citations if int(item["index"]) not in used]
-    if missing:
-        body += "".join(f"[{index}]" for index in missing)
-    return body, citations
+    for index, item in enumerate(ordered, start=1):
+        item["index"] = index
+    return "".join(rebuilt).rstrip(), ordered
 
 
 def _sentence_cites(sentence: str, item: dict) -> bool:
@@ -112,8 +108,8 @@ def _sentence_cites(sentence: str, item: dict) -> bool:
         return True
     if title and title in sentence:
         return True
-    probe = excerpt[:12]
-    return bool(probe) and probe in sentence
+    tokens = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{4,}", excerpt)
+    return any(token in sentence for token in tokens)
 
 
 def citations_for(chunks: list[dict]) -> list[dict]:

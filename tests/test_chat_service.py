@@ -55,6 +55,15 @@ class FakeCollection:
     def update_one(self, query, changes):
         self.find_one_and_update(query, changes)
 
+    def delete_one(self, query):
+        for index, row in enumerate(self.rows):
+            if self.matches(row, query):
+                del self.rows[index]
+                return
+
+    def delete_many(self, query):
+        self.rows = [row for row in self.rows if not self.matches(row, query)]
+
 
 class ChatServiceTests(TestCase):
     def setUp(self):
@@ -99,6 +108,33 @@ class ChatServiceTests(TestCase):
             self.service.send("browser-a", conversation["conversation_id"], "仍需保存的问题")
         messages = self.service.get("browser-a", conversation["conversation_id"])["messages"]
         self.assertEqual([(item["role"], item["content"]) for item in messages], [("user", "仍需保存的问题")])
+
+    def test_delete_removes_only_that_conversation(self):
+        conversation = self.service.create("browser-a")
+        other = self.service.create("browser-a")
+        foreign = self.service.create("browser-b")
+        self.service.send("browser-a", conversation["conversation_id"], "第一问")
+        self.service.delete("browser-a", conversation["conversation_id"])
+
+        self.assertEqual(
+            [item["conversation_id"] for item in self.service.list("browser-a")],
+            [other["conversation_id"]],
+        )
+        self.assertEqual(self.service.list("browser-b")[0]["conversation_id"], foreign["conversation_id"])
+        with self.assertRaises(LookupError):
+            self.service.get("browser-a", conversation["conversation_id"])
+        self.assertFalse(any(row.get("conversation_id") == conversation["conversation_id"] for row in self.messages.rows))
+
+    def test_answer_layout_splits_a_wall_of_text_into_sections(self):
+        from search.answer_layout import format_answer_layout
+
+        text = "先给结论：甲大于乙。[1]以下按主题分点对比。一、规模：甲更大。乙较小。二、利润：甲领先。乙增速快。"
+        laid = format_answer_layout(text)
+        self.assertEqual(format_answer_layout(laid), laid)
+        self.assertIn("结论", laid.split("\n\n")[0])
+        self.assertIn("规模", laid)
+        self.assertIn("利润", laid)
+        self.assertNotIn("对比。一、", laid)
 
     def test_follow_up_uses_only_its_conversation_history_after_reopening(self):
         conversation = self.service.create("browser-a")

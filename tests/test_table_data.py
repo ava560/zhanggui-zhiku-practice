@@ -35,13 +35,16 @@ class PostgresTableTests(TestCase):
 
     @classmethod
     def _wipe(cls, pattern: str) -> None:
+        skill_table = cls.conn.execute("SELECT to_regclass('public.user_skill') AS name").fetchone()
+        if skill_table and skill_table["name"]:
+            cls.conn.execute("DELETE FROM user_skill WHERE name LIKE %s", (pattern,))
         docs = cls.conn.execute(
             "SELECT doc_id FROM doc_info WHERE source_file LIKE %s",
             (pattern,),
         ).fetchall()
         doc_ids = [row["doc_id"] for row in docs]
         if not doc_ids:
-            cls.conn.rollback()
+            cls.conn.commit()
             return
         tables = cls.conn.execute(
             "SELECT DISTINCT table_name FROM table_info WHERE doc_id = ANY(%s)",
@@ -53,6 +56,8 @@ class PostgresTableTests(TestCase):
         ).fetchall()
         version_ids = [row["import_version_id"] for row in versions]
         cls.conn.execute("DELETE FROM data_job WHERE doc_ids && %s", (doc_ids,))
+        if cls.conn.execute("SELECT to_regclass('public.code_version') AS name").fetchone()["name"]:
+            cls.conn.execute("DELETE FROM code_version WHERE name LIKE %s", (pattern,))
         if version_ids:
             cls.conn.execute("DELETE FROM metric_info WHERE import_version_id = ANY(%s)", (version_ids,))
             cls.conn.execute("DELETE FROM column_info WHERE import_version_id = ANY(%s)", (version_ids,))
@@ -358,6 +363,149 @@ class PostgresTableTests(TestCase):
             self.conn.execute("SELECT 1 FROM data_job WHERE job_id = %s", (job["job_id"],)).fetchone(),
             None,
         )
+
+    def test_weekly_job_does_not_run_on_another_weekday(self) -> None:
+        from structured.jobs import _is_due
+
+        filename = f"{self.prefix}_周期.csv"
+        published = self._publish(self._stage(filename, ["区域"], [["东"]]), {"区域": "维度"})
+        calls = []
+
+        def renew(context) -> None:
+            calls.append(context.doc_id)
+
+        codes = {"renew_week": {"fn": renew, "doc_id": published["doc_id"]}}
+        monday_job = save_job(
+            self.conn,
+            name=f"{self.prefix} 周一",
+            sop_ref="SOP-周一",
+            run_at="09:30",
+            doc_ids=[published["doc_id"]],
+            code_id="renew_week",
+            schedule_kind="weekly",
+            schedule_day=1,
+        )
+        month_job = save_job(
+            self.conn,
+            name=f"{self.prefix} 每月",
+            sop_ref="SOP-每月",
+            run_at="09:30",
+            doc_ids=[published["doc_id"]],
+            code_id="renew_week",
+            schedule_kind="monthly",
+            schedule_day=9,
+        )
+        self.assertEqual(monday_job["schedule_kind"], "weekly")
+        self.assertEqual(monday_job["schedule_day"], 1)
+        tuesday = datetime(2026, 11, 10, 9, 30)
+        monday = datetime(2026, 11, 9, 9, 30)
+        self.assertFalse(_is_due(monday_job, tuesday))
+        self.assertTrue(_is_due(monday_job, monday))
+        self.assertTrue(_is_due(month_job, monday))
+        self.assertFalse(_is_due(month_job, tuesday))
+        done = run_job(self.conn, monday_job["job_id"], codes, RecordingIndex(), today=monday.date())
+        self.assertEqual(done["last_status"], "succeeded")
+        self.assertEqual(calls, [published["doc_id"]])
+
+    def test_new_code_version_keeps_the_old_object_and_a_failed_run_stays_pending(self) -> None:
+        from structured.code_versions import confirm_code, ready_source, stage_code
+
+        filename = f"{self.prefix}_代码表.csv"
+        published = self._publish(self._stage(filename, ["区域"], [["东"]]), {"区域": "维度"})
+        store = MemoryStore()
+        script_name = f"{self.prefix}_更新.py"
+        first = stage_code(self.conn, store, script_name, b"raise RuntimeError('beizhu broken')\n")
+        ready = confirm_code(
+            self.conn,
+            first["version_id"],
+            name=script_name,
+            description="第一版",
+            doc_id=published["doc_id"],
+        )
+        job = save_job(
+            self.conn,
+            name=f"{self.prefix} 代码",
+            sop_ref="SOP-代码",
+            run_at="08:00",
+            doc_ids=[published["doc_id"]],
+            code_id=ready["code_id"],
+        )
+        failed = run_job(
+            self.conn,
+            job["job_id"],
+            {},
+            RecordingIndex(),
+            today=datetime(2026, 11, 8).date(),
+            store=store,
+            fixer=lambda _source, _error: "context.replace_rows([{'c1': '南'}])\n",
+        )
+        self.assertEqual(failed["last_status"], "failed")
+        self.assertIn("待确认修改", failed["last_error"])
+        self.assertIn("没有替换正在使用的版本", failed["last_error"])
+        still_ready, _doc_id = ready_source(self.conn, store, ready["code_id"])
+        self.assertIn("beizhu broken", still_ready)
+        second = stage_code(
+            self.conn,
+            store,
+            script_name,
+            "context.replace_rows([{'c1': '西'}])\n".encode(),
+            code_id=ready["code_id"],
+        )
+        confirm_code(
+            self.conn,
+            second["version_id"],
+            name=script_name,
+            description="第二版",
+            doc_id=published["doc_id"],
+        )
+        self.assertIn(first["minio_key"], store.objects)
+        archived = self.conn.execute(
+            "SELECT status FROM code_version WHERE version_id = %s",
+            (first["version_id"],),
+        ).fetchone()
+        self.assertEqual(archived["status"], "archived")
+        current, _doc_id = ready_source(self.conn, store, ready["code_id"])
+        self.assertIn("西", current)
+        pending = self.conn.execute(
+            "SELECT status FROM code_version WHERE code_id = %s AND status = 'pending'",
+            (ready["code_id"],),
+        ).fetchall()
+        self.assertEqual(len(pending), 1)
+
+    def test_unchanged_values_still_move_the_value_index(self) -> None:
+        filename = f"{self.prefix}_原样.csv"
+        published = self._publish(
+            self._stage(filename, ["代码"], [["000001.OF"]]),
+            {"代码": "属性"},
+            value_index={"代码": True},
+        )
+        indexes = RecordingIndex()
+        replaced = replace_rows(self.conn, indexes, published["doc_id"], [{"c1": "000001.OF"}])
+        written = [call for call in indexes.calls if call["kind"] == "values"]
+        self.assertEqual([call["data_version_id"] for call in written], [replaced["data_version_id"]])
+        self.assertEqual(indexes.calls[-1]["kind"], "delete_values")
+
+    def test_user_defined_skill_is_saved_and_applied(self) -> None:
+        from structured.skills import apply_skill, delete_skill, list_skills, save_skill
+
+        saved = save_skill(
+            self.conn,
+            name=self.prefix + "查表",
+            summary="先看已发布的表",
+            instructions="只回答表里已经发布的记录。",
+        )
+        try:
+            self.assertTrue(saved["skill_id"].startswith("sk_"))
+            found = [item for item in list_skills(self.conn) if item["skill_id"] == saved["skill_id"]]
+            self.assertEqual(found[0]["summary"], "先看已发布的表")
+            self.assertEqual(
+                apply_skill(saved["skill_id"], "有几行"),
+                "只回答表里已经发布的记录。\n\n用户问题：有几行",
+            )
+            with self.assertRaises(ValueError):
+                apply_skill("sk_" + "0" * 32, "有几行")
+        finally:
+            delete_skill(self.conn, saved["skill_id"])
 
     def _stage(self, filename: str, headers: list[str], rows: list[list[object]]) -> dict:
         store = MemoryStore()

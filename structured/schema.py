@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS data_job (
     description text,
     code_id text,
     run_at time NOT NULL,
+    schedule_kind text NOT NULL DEFAULT 'daily',
+    schedule_day integer,
+    skill_id text,
     doc_ids text[] NOT NULL,
     enabled boolean NOT NULL,
     last_run_at timestamptz,
@@ -98,7 +101,35 @@ CREATE TABLE IF NOT EXISTS data_job (
     last_success_on date,
     CONSTRAINT data_job_name CHECK (name <> ''),
     CONSTRAINT data_job_sop CHECK (sop_ref <> ''),
-    CONSTRAINT data_job_status CHECK (last_status IN ('never', 'running', 'succeeded', 'failed'))
+    CONSTRAINT data_job_status CHECK (last_status IN ('never', 'running', 'succeeded', 'failed')),
+    CONSTRAINT data_job_schedule CHECK (schedule_kind IN ('daily', 'weekly', 'monthly'))
+);
+
+CREATE TABLE IF NOT EXISTS code_version (
+    version_id text PRIMARY KEY,
+    code_id text NOT NULL,
+    name text NOT NULL,
+    description text NOT NULL DEFAULT '',
+    doc_id text,
+    minio_key text NOT NULL,
+    status text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT code_version_status CHECK (status IN ('pending', 'ready', 'archived')),
+    CONSTRAINT code_version_name CHECK (name <> '')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS code_version_one_ready
+    ON code_version (code_id) WHERE status = 'ready';
+
+CREATE TABLE IF NOT EXISTS user_skill (
+    skill_id text PRIMARY KEY,
+    name text NOT NULL,
+    summary text NOT NULL DEFAULT '',
+    instructions text NOT NULL,
+    code_id text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT user_skill_name CHECK (name <> ''),
+    CONSTRAINT user_skill_instructions CHECK (instructions <> '')
 );
 """
 
@@ -109,11 +140,69 @@ def ensure_schema(conn: Connection) -> None:
     started_idle = conn.info.transaction_status == TransactionStatus.IDLE
     found = conn.execute("SELECT to_regclass('public.doc_info') AS name").fetchone()
     if found and found["name"]:
-        if started_idle:
-            conn.rollback()
+        if not started_idle:
+            return
+        conn.rollback()
+        _ensure_extensions(conn)
         return
     for statement in METADATA_DDL.split(";"):
         sql_text = statement.strip()
         if sql_text:
             conn.execute(sql_text)
+    conn.commit()
+    _ensure_extensions(conn)
+
+
+def _ensure_extensions(conn: Connection) -> None:
+    conn.execute("ALTER TABLE data_job ADD COLUMN IF NOT EXISTS schedule_kind text NOT NULL DEFAULT 'daily'")
+    conn.execute("ALTER TABLE data_job ADD COLUMN IF NOT EXISTS schedule_day integer")
+    conn.execute("ALTER TABLE data_job ADD COLUMN IF NOT EXISTS skill_id text")
+    conn.execute(
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE data_job
+                ADD CONSTRAINT data_job_schedule
+                CHECK (schedule_kind IN ('daily', 'weekly', 'monthly'));
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+        END $$
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS code_version (
+            version_id text PRIMARY KEY,
+            code_id text NOT NULL,
+            name text NOT NULL,
+            description text NOT NULL DEFAULT '',
+            doc_id text,
+            minio_key text NOT NULL,
+            status text NOT NULL,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            CONSTRAINT code_version_status CHECK (status IN ('pending', 'ready', 'archived')),
+            CONSTRAINT code_version_name CHECK (name <> '')
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS code_version_one_ready
+            ON code_version (code_id) WHERE status = 'ready'
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_skill (
+            skill_id text PRIMARY KEY,
+            name text NOT NULL,
+            summary text NOT NULL DEFAULT '',
+            instructions text NOT NULL,
+            code_id text NOT NULL DEFAULT '',
+            created_at timestamptz NOT NULL DEFAULT now(),
+            CONSTRAINT user_skill_name CHECK (name <> ''),
+            CONSTRAINT user_skill_instructions CHECK (instructions <> '')
+        )
+        """
+    )
     conn.commit()

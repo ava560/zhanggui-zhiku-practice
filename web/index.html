@@ -98,6 +98,26 @@
           </article>
         </section>
 
+        <section class="history-section code-section" aria-labelledby="codeTitle">
+          <div class="history-heading">
+            <div>
+              <p class="section-label">定时任务代码</p>
+              <h2 id="codeTitle">上传代码</h2>
+            </div>
+            <span class="format-badge">.py</span>
+          </div>
+          <p class="review-note">先确认名称和说明，再保存。同一段代码再上传时，旧版本保留，只是不再作为当前版本。对话里不能运行这些代码。</p>
+          <form id="codeForm" class="table-review">
+            <label>代码文件 <input id="codeFile" name="file" type="file" accept=".py" required /></label>
+            <label>沿用已有代码 <select id="codeTarget" name="target"></select></label>
+            <label>代码名称 <input id="codeName" name="codeName" maxlength="80" required /></label>
+            <label>代码说明 <textarea id="codeDescription" name="codeDescription" maxlength="200" required></textarea></label>
+            <label>更新的文件 <select id="codeDoc" name="doc"></select></label>
+            <button class="primary-action review-submit" type="submit">确认上传</button>
+          </form>
+          <div class="version-list" id="codeVersions"></div>
+        </section>
+
         <section class="history-section" aria-labelledby="historyTitle">
           <div class="history-heading">
             <div>

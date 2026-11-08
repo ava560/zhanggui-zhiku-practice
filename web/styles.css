@@ -672,6 +672,9 @@ button {
 .field-table th, .field-table td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 .field-table thead th { color: var(--muted); font-size: 11px; }
 .review-submit { width: auto; }
+.code-section { margin-top: 24px; }
+.code-section textarea { width: 100%; min-height: 72px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.version-list { display: grid; gap: 6px; margin-top: 14px; color: var(--muted); font-size: 12px; }
 .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip-row button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: white; }
 

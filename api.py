@@ -248,6 +248,18 @@ async def delete_memory(request: Request) -> JSONResponse:
         return _chat_failure(exc, new_user_id=new_user_id)
 
 
+@app.delete("/api/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str, request: Request) -> JSONResponse:
+    if not re.fullmatch(r"[0-9a-f]{32}", conversation_id):
+        return _json({"error": "对话不存在"}, HTTPStatus.NOT_FOUND)
+    user_id, new_user_id = _chat_identity(request)
+    try:
+        get_chat_service().delete(user_id, conversation_id)
+        return _json({"removed": True}, new_user_id=new_user_id)
+    except Exception as exc:
+        return _chat_failure(exc, new_user_id=new_user_id)
+
+
 @app.get("/api/conversations/{conversation_id}")
 def get_conversation(conversation_id: str, request: Request) -> JSONResponse:
     if not re.fullmatch(r"[0-9a-f]{32}", conversation_id):
@@ -269,6 +281,9 @@ async def send_message(conversation_id: str, request: Request) -> JSONResponse:
         content = payload.get("content")
         if not isinstance(content, str):
             raise ValueError("content 必须是文本")
+        from structured.skills import apply_skill
+
+        content = apply_skill(payload.get("skill_id"), content)
         answer = await asyncio.to_thread(
             get_chat_service().send,
             user_id,
@@ -314,6 +329,9 @@ async def stream_message(conversation_id: str, request: Request) -> Response:
         content = payload.get("content")
         if not isinstance(content, str):
             raise ValueError("content 必须是文本")
+        from structured.skills import apply_skill
+
+        content = apply_skill(payload.get("skill_id"), content)
         mode = _answer_mode(payload)
         use_web = _use_web_search(payload)
     except Exception as exc:
@@ -398,6 +416,16 @@ def _service_error(exc: Exception) -> JSONResponse:
     return _json({"error": "结构化数据查询失败，不能据此判断表里是否有记录。"}, HTTPStatus.BAD_GATEWAY)
 
 
+@app.get("/api/table-imports")
+def table_imports() -> JSONResponse:
+    from structured.http_api import published_tables
+
+    try:
+        return _json(published_tables())
+    except Exception as exc:
+        return _service_error(exc)
+
+
 @app.post("/api/table-imports", status_code=HTTPStatus.ACCEPTED)
 async def stage_table_import(request: Request, filename: str = "", sheet_name: str = "") -> JSONResponse:
     from structured.http_api import stage_upload
@@ -470,6 +498,140 @@ async def patch_data_job(job_id: str, request: Request) -> JSONResponse:
     try:
         payload = _read_json(await request.body())
         return _json(jobs_update(job_id, payload))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/data-jobs/{job_id}/run")
+def run_data_job(job_id: str) -> JSONResponse:
+    from structured.http_api import jobs_run
+
+    try:
+        return _json(jobs_run(job_id))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.get("/api/skills")
+def skills() -> JSONResponse:
+    from structured.skills import list_skills
+
+    try:
+        return _json({"skills": list_skills()})
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/skills")
+async def create_skill(request: Request) -> JSONResponse:
+    from structured.session import open_db
+    from structured.skills import save_skill
+
+    try:
+        payload = json.loads(await request.body() or b"{}")
+        if not isinstance(payload, dict):
+            raise ValueError("请求内容必须是 JSON 对象")
+        conn = open_db()
+        try:
+            saved = save_skill(
+                conn,
+                name=str(payload.get("name") or ""),
+                instructions=str(payload.get("instructions") or ""),
+                summary=str(payload.get("summary") or ""),
+                code_id=str(payload.get("code_id") or ""),
+            )
+        finally:
+            conn.close()
+        return _json(saved, HTTPStatus.CREATED)
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.patch("/api/skills/{skill_id}")
+async def revise_skill(skill_id: str, request: Request) -> JSONResponse:
+    from structured.session import open_db
+    from structured.skills import save_skill
+
+    if not re.fullmatch(r"sk_[0-9a-f]{32}", skill_id):
+        return _json({"error": "技能不存在"}, HTTPStatus.NOT_FOUND)
+    try:
+        payload = json.loads(await request.body() or b"{}")
+        if not isinstance(payload, dict):
+            raise ValueError("请求内容必须是 JSON 对象")
+        conn = open_db()
+        try:
+            saved = save_skill(
+                conn,
+                skill_id=skill_id,
+                name=str(payload.get("name") or ""),
+                instructions=str(payload.get("instructions") or ""),
+                summary=str(payload.get("summary") or ""),
+                code_id=str(payload.get("code_id") or ""),
+            )
+        finally:
+            conn.close()
+        return _json(saved)
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.delete("/api/skills/{skill_id}")
+def remove_skill(skill_id: str) -> JSONResponse:
+    from structured.session import open_db
+    from structured.skills import delete_skill
+
+    if not re.fullmatch(r"sk_[0-9a-f]{32}", skill_id):
+        return _json({"error": "技能不存在"}, HTTPStatus.NOT_FOUND)
+    try:
+        conn = open_db()
+        try:
+            delete_skill(conn, skill_id)
+        finally:
+            conn.close()
+        return _json({"removed": True})
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.get("/api/code-imports")
+def code_imports() -> JSONResponse:
+    from structured.http_api import code_catalog
+
+    try:
+        return _json(code_catalog())
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/code-imports", status_code=HTTPStatus.ACCEPTED)
+async def stage_code_import(request: Request, filename: str = "", code_id: str = "") -> JSONResponse:
+    from structured.http_api import stage_code_upload
+
+    safe_name = safe_filename(filename)
+    if not safe_name.lower().endswith(".py"):
+        return _json({"error": "代码文件只接受 .py"}, HTTPStatus.BAD_REQUEST)
+    data = await request.body()
+    if not data:
+        return _json({"error": "上传内容为空"}, HTTPStatus.BAD_REQUEST)
+    if len(data) > MAX_UPLOAD_BYTES:
+        return _json({"error": "文件超过大小限制"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+    try:
+        return _json(stage_code_upload(safe_name, data, code_id or None), HTTPStatus.ACCEPTED)
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/code-imports/{version_id}/confirm")
+async def confirm_code_import(version_id: str, request: Request) -> JSONResponse:
+    from structured.http_api import confirm_code_upload
+
+    if not re.fullmatch(r"cv_[0-9a-f]{32}", version_id):
+        return _json({"error": "代码版本不存在"}, HTTPStatus.NOT_FOUND)
+    try:
+        payload = json.loads(await request.body() or b"{}")
+        if not isinstance(payload, dict):
+            raise ValueError("请求内容必须是 JSON 对象")
+        return _json(confirm_code_upload(version_id, payload))
     except Exception as exc:
         return _service_error(exc)
 

@@ -311,8 +311,10 @@ def replace_rows(
     current = _ready_table(conn, doc_id)
     columns = _columns(conn, current["import_version_id"])
     names = {column["column_name"] for column in columns}
+    headers = {(column["aliases"] or [column["column_name"]])[0] for column in columns}
     for row in rows:
-        if set(row) != names:
+        keys = set(row)
+        if keys != names and keys != headers:
             raise CatalogError("入库字段与元数据不一致，本次不入库")
     data_version_id = _new_id("dv")
     records = [_coerce_row(_row_by_header(row, columns), columns) for row in rows]
@@ -320,8 +322,7 @@ def replace_rows(
         _insert_rows(conn, current, columns, records, data_version_id)
     conn.commit()
     indexed = [column for column in columns if column["value_index"]]
-    changed = _indexed_values_changed(conn, current, indexed, data_version_id)
-    if changed:
+    if indexed:
         try:
             indexes.write_values(data_version_id, _value_records(current, indexed, records, data_version_id))
         except Exception as exc:
@@ -333,7 +334,7 @@ def replace_rows(
             (data_version_id, current["import_version_id"]),
         )
     conn.commit()
-    if changed and previous:
+    if indexed and previous:
         indexes.delete_values(previous)
     return {"doc_id": doc_id, "data_version_id": data_version_id, "import_version_id": current["import_version_id"]}
 

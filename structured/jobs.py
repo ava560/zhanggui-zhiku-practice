@@ -65,21 +65,41 @@ def save_job(
     description: str = "",
     code_id: str | None = None,
     enabled: bool = True,
+    schedule_kind: str = "daily",
+    schedule_day: int | None = None,
+    skill_id: str | None = None,
 ) -> dict[str, Any]:
+    from structured.schema import ensure_schema
+
     if not str(name).strip() or not str(sop_ref).strip():
         raise JobError("任务名称和 SOP 标识不能为空")
     _reject_code_body(code_id)
     clock = _clock(run_at)
+    kind, day = _schedule(schedule_kind, schedule_day)
+    skill = _skill(skill_id)
     cleaned = _existing_docs(conn, doc_ids)
+    ensure_schema(conn)
     job_id = "job_" + uuid.uuid4().hex
     conn.execute(
         """
         INSERT INTO data_job (
-            job_id, name, sop_ref, description, code_id, run_at, doc_ids, enabled,
-            last_run_at, last_status, last_error, last_success_on
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, 'never', NULL, NULL)
+            job_id, name, sop_ref, description, code_id, run_at, schedule_kind, schedule_day,
+            skill_id, doc_ids, enabled, last_run_at, last_status, last_error, last_success_on
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, 'never', NULL, NULL)
         """,
-        (job_id, name.strip(), sop_ref.strip(), description.strip(), (code_id or "").strip() or None, clock, cleaned, enabled),
+        (
+            job_id,
+            name.strip(),
+            sop_ref.strip(),
+            description.strip(),
+            (code_id or "").strip() or None,
+            clock,
+            kind,
+            day,
+            skill,
+            cleaned,
+            enabled,
+        ),
     )
     conn.commit()
     return get_job(conn, job_id)
@@ -91,13 +111,25 @@ def update_job(
     *,
     description: str | None = None,
     run_at: str | None = None,
+    schedule_kind: str | None = None,
+    schedule_day: int | None = None,
+    skill_id: str | None = None,
 ) -> dict[str, Any]:
     current = get_job(conn, job_id)
     next_description = current["description"] if description is None else description.strip()
     clock = current["run_at"] if run_at is None else _clock(run_at)
+    if schedule_kind is None:
+        kind, day = current.get("schedule_kind") or "daily", current.get("schedule_day")
+    else:
+        kind, day = _schedule(schedule_kind, current.get("schedule_day") if schedule_day is None else schedule_day)
+    skill = current.get("skill_id") if skill_id is None else _skill(skill_id)
     conn.execute(
-        "UPDATE data_job SET description = %s, run_at = %s WHERE job_id = %s",
-        (next_description, clock, job_id),
+        """
+        UPDATE data_job
+        SET description = %s, run_at = %s, schedule_kind = %s, schedule_day = %s, skill_id = %s
+        WHERE job_id = %s
+        """,
+        (next_description, clock, kind, day, skill, job_id),
     )
     conn.commit()
     return get_job(conn, job_id)
@@ -117,7 +149,7 @@ def get_job(conn: Connection, job_id: str) -> dict[str, Any]:
     return _public(row)
 
 
-def preview_job(conn: Connection, job_id: str, codes: dict[str, Any]) -> dict[str, Any]:
+def preview_job(conn: Connection, job_id: str, codes: dict[str, Any], store: Any = None) -> dict[str, Any]:
     job = get_job(conn, job_id)
     files = []
     for doc_id in job["doc_ids"]:
@@ -125,11 +157,20 @@ def preview_job(conn: Connection, job_id: str, codes: dict[str, Any]) -> dict[st
             files.append(_plain_sample(sample_rows(conn, doc_id)))
         except Exception as exc:
             files.append({"doc_id": doc_id, "error": str(exc)})
-    code = codes.get(job["code_id"] or "")
+    code_id = _bound_code(job)
+    code = codes.get(code_id)
     source = ""
+    registered = code is not None
     if code is not None:
         source = inspect.getsource(code["fn"] if isinstance(code, dict) else code)
-    return {**job, "files": files, "code_preview": source, "code_registered": code is not None}
+    elif store is not None and code_id:
+        from structured.code_versions import ready_source
+
+        loaded = ready_source(conn, store, code_id)
+        if loaded:
+            source, _doc_id = loaded
+            registered = True
+    return {**job, "files": files, "code_preview": source, "code_registered": registered}
 
 
 def run_job(
@@ -139,13 +180,28 @@ def run_job(
     indexes: Any,
     *,
     today: date | None = None,
+    store: Any = None,
+    fixer: Any = None,
 ) -> dict[str, Any]:
     job = get_job(conn, job_id)
     current_day = today or datetime.now(timezone.utc).date()
     if job["last_success_on"] == current_day.isoformat():
         return job
-    code = codes.get(job["code_id"] or "")
-    if not job["code_id"] or code is None:
+    code_id = _bound_code(job)
+    code = codes.get(code_id)
+    source_text = ""
+    if code is None and store is not None and code_id:
+        from structured.code_versions import ready_source
+
+        loaded = ready_source(conn, store, code_id)
+        if loaded:
+            source_text, uploaded_doc = loaded
+
+            def uploaded(context, script=source_text, label=code_id):
+                exec(compile(script, label, "exec"), {"context": context, "replace_rows": context.replace_rows})
+
+            code = {"fn": uploaded, "doc_id": uploaded_doc}
+    if not code_id or code is None:
         return job
     fn = code["fn"] if isinstance(code, dict) else code
     doc_id = code.get("doc_id") if isinstance(code, dict) else getattr(fn, "doc_id", "")
@@ -160,7 +216,27 @@ def run_job(
     try:
         fn(JobContext(conn, indexes, doc_id))
     except Exception as exc:
-        _mark_failed(conn, job_id, str(exc) or type(exc).__name__)
+        conn.rollback()
+        message = str(exc) or type(exc).__name__
+        if fixer is not None and store is not None:
+            origin = source_text
+            if not origin:
+                try:
+                    origin = inspect.getsource(fn)
+                except Exception:
+                    origin = ""
+            suggestion = ""
+            if origin:
+                try:
+                    suggestion = fixer(origin, message) or ""
+                except Exception:
+                    suggestion = ""
+            if suggestion.strip():
+                from structured.code_versions import save_pending_fix
+
+                saved = save_pending_fix(conn, store, code_id, suggestion, doc_id=doc_id, name=code_id)
+                message += f"\n已生成待确认修改 {saved['version_id']}，没有替换正在使用的版本，也没有再次运行。"
+        _mark_failed(conn, job_id, message)
         return get_job(conn, job_id)
     conn.execute(
         """
@@ -174,16 +250,21 @@ def run_job(
     return get_job(conn, job_id)
 
 
-def run_due(conn: Connection, codes: dict[str, Any], indexes: Any, now: datetime) -> list[str]:
+def run_due(
+    conn: Connection,
+    codes: dict[str, Any],
+    indexes: Any,
+    now: datetime,
+    store: Any = None,
+    fixer: Any = None,
+) -> list[str]:
     """确认运行时刻后由调用方每分钟触发。本函数本身不挂到进程上。"""
     ran = []
     for job in list_jobs(conn):
-        if not job["enabled"]:
-            continue
-        if job["run_at"] != now.strftime("%H:%M"):
+        if not job["enabled"] or not _is_due(job, now):
             continue
         before = job["last_status"]
-        after = run_job(conn, job["job_id"], codes, indexes, today=now.date())
+        after = run_job(conn, job["job_id"], codes, indexes, today=now.date(), store=store, fixer=fixer)
         if after["last_status"] != before or after["last_run_at"] != job["last_run_at"]:
             ran.append(job["job_id"])
     return ran
@@ -196,7 +277,7 @@ def _mark_failed(conn: Connection, job_id: str, message: str) -> None:
         SET last_status = 'failed', last_run_at = %s, last_error = %s
         WHERE job_id = %s
         """,
-        (datetime.now(timezone.utc), message[:500], job_id),
+        (datetime.now(timezone.utc), message[:1200], job_id),
     )
     conn.commit()
 
@@ -219,6 +300,55 @@ def _existing_docs(conn: Connection, doc_ids: list[str]) -> list[str]:
     return cleaned
 
 
+def _schedule(kind: str, day: int | None) -> tuple[str, int | None]:
+    text = str(kind or "daily").strip() or "daily"
+    if text not in {"daily", "weekly", "monthly"}:
+        raise JobError("重复周期只能是每天、每周或每月")
+    if text == "daily":
+        return "daily", None
+    try:
+        number = int(day)
+    except (TypeError, ValueError) as exc:
+        raise JobError("每周或每月要选择具体的一天") from exc
+    if text == "weekly" and not 1 <= number <= 7:
+        raise JobError("每周要选择周一到周日")
+    if text == "monthly" and not 1 <= number <= 31:
+        raise JobError("每月要选择 1 到 31 号")
+    return text, number
+
+
+def _skill(skill_id: str | None) -> str | None:
+    from structured.skills import skill_by_id
+
+    text = str(skill_id or "").strip()
+    if not text:
+        return None
+    if skill_by_id(text) is None:
+        raise JobError("技能不存在")
+    return text
+
+
+def _bound_code(job: dict[str, Any]) -> str:
+    from structured.skills import skill_by_id
+
+    if job.get("code_id"):
+        return str(job["code_id"])
+    skill = skill_by_id(str(job.get("skill_id") or ""))
+    return str((skill or {}).get("code_id") or "")
+
+
+def _is_due(job: dict[str, Any], now: datetime) -> bool:
+    if job["run_at"] != now.strftime("%H:%M"):
+        return False
+    kind = job.get("schedule_kind") or "daily"
+    day = job.get("schedule_day")
+    if kind == "weekly":
+        return now.isoweekday() == int(day or 0)
+    if kind == "monthly":
+        return now.day == int(day or 0)
+    return True
+
+
 def _clock(value: str) -> str:
     text = str(value or "").strip()
     try:
@@ -227,7 +357,7 @@ def _clock(value: str) -> str:
             raise ValueError
         parsed = datetime.strptime(f"{int(hour):02d}:{minute}", "%H:%M")
     except ValueError as exc:
-        raise JobError("每天的钟点要写成 HH:MM") from exc
+        raise JobError("钟点要写成 HH:MM") from exc
     return parsed.strftime("%H:%M")
 
 

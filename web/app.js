@@ -8,6 +8,7 @@ const state = {
   tasks: [],
   selectedTaskId: null,
   uploading: false,
+  published: [],
 };
 
 const elements = {
@@ -200,23 +201,30 @@ function renderSelectedTask() {
 }
 
 function renderHistory() {
-  elements.historyCount.textContent = `${state.tasks.length} 个任务`;
-  if (!state.tasks.length) {
+  const published = state.published || [];
+  elements.historyCount.textContent = `${state.tasks.length + published.length} 个任务`;
+  const documents = state.tasks.map((task) => {
+    const statusText = task.status === "failed" ? "失败" : `${task.progress}%`;
+    return `
+      <button class="history-row ${task.id === state.selectedTaskId ? "selected" : ""}" type="button" data-task-id="${task.id}">
+        <span class="history-name" title="${escapeHtml(task.filename)}">${escapeHtml(task.filename)}</span>
+        <span class="history-stage">${escapeHtml(task.stage_label)}</span>
+        <span class="history-progress ${task.status === "failed" ? "failed" : ""}">${statusText}</span>
+        <span class="history-time">${formatTime(task.updated_at)}</span>
+      </button>`;
+  });
+  const tables = published.map((item) => `
+    <button class="history-row" type="button" data-published="${escapeHtml(item.doc_id)}">
+      <span class="history-name" title="${escapeHtml(item.source_file)}">${escapeHtml(item.source_file)}</span>
+      <span class="history-stage">表格已发布</span>
+      <span class="history-progress">完成</span>
+      <span class="history-time">${escapeHtml(item.format || "")}</span>
+    </button>`);
+  if (!documents.length && !tables.length) {
     elements.historyList.innerHTML = '<div class="history-empty">完成第一次上传后，任务会出现在这里。</div>';
     return;
   }
-  elements.historyList.innerHTML = state.tasks
-    .map((task) => {
-      const statusText = task.status === "failed" ? "失败" : `${task.progress}%`;
-      return `
-        <button class="history-row ${task.id === state.selectedTaskId ? "selected" : ""}" type="button" data-task-id="${task.id}">
-          <span class="history-name" title="${escapeHtml(task.filename)}">${escapeHtml(task.filename)}</span>
-          <span class="history-stage">${escapeHtml(task.stage_label)}</span>
-          <span class="history-progress ${task.status === "failed" ? "failed" : ""}">${statusText}</span>
-          <span class="history-time">${formatTime(task.updated_at)}</span>
-        </button>`;
-    })
-    .join("");
+  elements.historyList.innerHTML = documents.concat(tables).join("");
 }
 
 function renderTasks() {
@@ -233,6 +241,7 @@ async function loadTasks() {
     state.tasks = data.tasks;
     elements.systemState.classList.add("ready");
     elements.systemState.querySelector("span:last-child").textContent = "入库服务已连接";
+    await loadPublished();
     renderTasks();
   } catch (error) {
     elements.systemState.classList.remove("ready");
@@ -361,10 +370,24 @@ function showTableReview(draft, file) {
   document.querySelector("#tableConfirm").addEventListener("submit", submitTableConfirm);
 }
 
+async function loadPublished() {
+  try {
+    const response = await fetch("/api/table-imports", { cache: "no-store" });
+    if (!response.ok) return;
+    const data = await response.json();
+    state.published = Array.isArray(data.tables) ? data.tables : [];
+  } catch {
+    state.published = state.published || [];
+  }
+}
+
 async function submitTableConfirm(event) {
   event.preventDefault();
   const draft = state.tableReview;
   const form = event.currentTarget;
+  const button = form.querySelector("button");
+  button.disabled = true;
+  button.textContent = "正在发布";
   const columns = (draft.columns || []).map((column, index) => ({
     column_id: column.column_id,
     description: form.querySelector(`[data-field="description"][data-index="${index}"]`).value,
@@ -380,6 +403,7 @@ async function submitTableConfirm(event) {
     columns,
     metrics: [],
   };
+  elements.resultPanel.insertAdjacentHTML("afterbegin", `<p class="review-note" id="publishProgress">1/3 已提交确认，正在写入数据库和索引。</p>`);
   const response = await fetch(`/api/table-imports/${draft.import_version_id}/confirm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -387,11 +411,23 @@ async function submitTableConfirm(event) {
   });
   const result = await response.json();
   if (!response.ok) {
+    button.disabled = false;
+    button.textContent = "确认发布";
     toast(result.error || "发布失败", true);
     return;
   }
   state.tableReview = { published: true };
-  elements.resultPanel.innerHTML = `<p>已发布 ${escapeHtml(result.source_file)}，表 ${escapeHtml(result.table_name)}，${result.row_count} 行。</p>`;
+  await loadPublished();
+  renderHistory();
+  toast(`已发布 ${result.source_file}`);
+  elements.resultPanel.innerHTML = `
+    <h3>发布完成</h3>
+    <ol class="publish-steps">
+      <li>已接收确认</li>
+      <li>已写入 PostgreSQL</li>
+      <li>索引已完成，当前版本可以查询</li>
+    </ol>
+    <p>已发布 ${escapeHtml(result.source_file)}，表 ${escapeHtml(result.table_name)}，${result.row_count} 行。下方任务列表已显示这条表。</p>`;
 }
 
 async function initialize() {
@@ -454,5 +490,85 @@ elements.historyList.addEventListener("click", (event) => {
   renderTasks();
 });
 elements.startButton.addEventListener("click", startUpload);
+document.querySelector("#codeForm").addEventListener("submit", submitCode);
+loadCodeCatalog().catch((error) => toast(error.message, true));
+
+async function loadCodeCatalog() {
+  const [versions, jobs] = await Promise.all([
+    fetch("/api/code-imports", { cache: "no-store" }).then(readJson),
+    fetch("/api/data-jobs", { cache: "no-store" }).then(readJson),
+  ]);
+  const target = document.querySelector("#codeTarget");
+  target.replaceChildren();
+  const fresh = document.createElement("option");
+  fresh.value = "";
+  fresh.textContent = "作为新代码";
+  target.append(fresh);
+  const seen = new Set();
+  for (const item of versions.versions || []) {
+    if (!item.code_id || seen.has(item.code_id)) continue;
+    seen.add(item.code_id);
+    const option = document.createElement("option");
+    option.value = item.code_id;
+    option.textContent = item.name || item.code_id;
+    target.append(option);
+  }
+  const doc = document.querySelector("#codeDoc");
+  doc.replaceChildren();
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "不绑定文件";
+  doc.append(none);
+  for (const item of jobs.documents || []) {
+    const option = document.createElement("option");
+    option.value = item.doc_id;
+    option.textContent = `${item.source_file} · ${item.status}`;
+    doc.append(option);
+  }
+  const list = document.querySelector("#codeVersions");
+  list.replaceChildren();
+  for (const item of versions.versions || []) {
+    const row = document.createElement("p");
+    row.textContent = `${item.name} · ${item.status} · ${item.version_id}`;
+    list.append(row);
+  }
+}
+
+async function readJson(response) {
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "读取失败");
+  return data;
+}
+
+async function submitCode(event) {
+  event.preventDefault();
+  const file = document.querySelector("#codeFile").files[0];
+  if (!file) return;
+  const target = document.querySelector("#codeTarget").value;
+  const params = new URLSearchParams({ filename: file.name });
+  if (target) params.set("code_id", target);
+  const button = event.currentTarget.querySelector("button");
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/code-imports?${params}`, { method: "POST", body: await file.arrayBuffer() });
+    const staged = await readJson(response);
+    await readJson(await fetch(`/api/code-imports/${staged.version_id}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: document.querySelector("#codeName").value.trim(),
+        description: document.querySelector("#codeDescription").value.trim(),
+        doc_id: document.querySelector("#codeDoc").value,
+      }),
+    }));
+    event.target.reset();
+    await loadCodeCatalog();
+    toast("代码已保存，旧版本仍保留");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
 
 initialize();

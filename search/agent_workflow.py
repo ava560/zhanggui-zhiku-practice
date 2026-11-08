@@ -146,7 +146,7 @@ def run_agent_workflow(
         state["evidence_status"] = "retrieval_error"
         state["citations"] = []
         return state
-    if not display:
+    if not display and not _has_answer_background(state):
         state["final_answer"] = NO_INFO
         state["evidence_status"] = "unsupported"
         state["citations"] = []
@@ -199,7 +199,7 @@ def _finish_simple(state: dict[str, Any], result: dict[str, Any], answerer) -> d
         state["evidence_status"] = "retrieval_error"
         state["citations"] = []
         return state
-    if not display:
+    if not display and (reason or not _has_answer_background(state)):
         state["final_answer"] = _table_message(reason) or NO_INFO
         state["evidence_status"] = "unsupported"
         state["citations"] = []
@@ -216,6 +216,16 @@ def _display_chunks(result: dict[str, Any]) -> list[dict[str, Any]]:
     return list(result.get("chunks") or []) + table_display_chunks(list(result.get("table_results") or []))
 
 
+def _has_answer_background(state: dict[str, Any]) -> bool:
+    from search.node_answer_output import has_answer_background
+
+    return has_answer_background(
+        state.get("conversation_history"),
+        state.get("session_memory"),
+        state.get("long_term_memory"),
+    )
+
+
 def _table_message(reason: str) -> str:
     return {
         "query_failed": "结构化数据查询失败，不能据此判断表里是否有记录。",
@@ -230,17 +240,24 @@ def _write_model_answer(state, chunks, gaps, web_error, answerer, trace=None):
         state["react_trace"] = trace
     state["citations"] = citations_for(chunks)
     state["awaiting_user_confirmation"] = False
-    if not chunks:
+    if not chunks and not _has_answer_background(state):
         state["final_answer"] = NO_INFO
         state["evidence_status"] = "unsupported"
         return state
     question = str(state.get("question_rewritten") or state.get("current_question") or "")
     report_status(state, "正在组织回答")
-    ranked = _rerank_with_bge(question, chunks) if answerer is None else chunks
+    ranked = _rerank_with_bge(question, chunks) if answerer is None and chunks else chunks
     if answerer is None:
         from search.node_answer_output import generate_answer
 
-        answer, _images = generate_answer(str(state.get("current_question") or question), question, ranked)
+        answer, _images = generate_answer(
+            str(state.get("current_question") or question),
+            question,
+            ranked,
+            history=list(state.get("conversation_history") or [])[-10:],
+            session_memory=state.get("session_memory") or {},
+            long_term=state.get("long_term_memory") or [],
+        )
     else:
         answer = answerer(state, ranked, gaps, web_error)
     marked, citations = annotate_answer(answer, ranked, download_for=_download_link)
