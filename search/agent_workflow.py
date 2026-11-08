@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 from search.citations import NO_INFO, RETRIEVAL_ERROR, annotate_answer, citations_for
 from search.intent_classify import IntentClassificationError, classify_intent, default_llm
 from search.long_term_memory import extract_explicit_memory, get_memory_book
+from search.private_evidence import run_private_evidence, table_display_chunks
 from search.react_agent import run_react
 from search.self_ask import run_private_self_ask, run_web_self_ask
-from search.shared_query import report_status, resolve_with_registry, run_shared_query
+from search.shared_query import report_status, resolve_with_registry
 
 
 def run_agent_workflow(
@@ -73,7 +74,7 @@ def run_agent_workflow(
         state["question_rewritten"] = question
         return state
     if intent == "simple":
-        return _finish_simple(state, run_shared_query(state, active_ports), answerer)
+        return _finish_simple(state, run_private_evidence(state, active_ports), answerer)
 
     active_planner = planner or (lambda context: _plan_with_llm(context, caller))
 
@@ -134,12 +135,24 @@ def run_agent_workflow(
         if item.get("web_search_error"):
             web_error = str(item["web_search_error"])
             break
-    if any(item.get("status") == "retrieval_error" for item in result.get("evidences") or []) and not result.get("chunks"):
+    table_results = []
+    for item in result.get("evidences") or []:
+        table_results.extend(item.get("table_results") or [])
+        if item.get("table_reason") == "query_failed":
+            gaps.append("结构化数据查询失败，不能据此判断表里是否有记录。")
+    display = list(result.get("chunks") or []) + table_display_chunks(table_results)
+    if any(item.get("status") == "retrieval_error" for item in result.get("evidences") or []) and not display:
         state["final_answer"] = RETRIEVAL_ERROR
         state["evidence_status"] = "retrieval_error"
         state["citations"] = []
         return state
-    return _write_model_answer(state, result.get("chunks") or [], gaps, web_error, answerer, trace=result.get("trace") or [])
+    if not display:
+        state["final_answer"] = NO_INFO
+        state["evidence_status"] = "unsupported"
+        state["citations"] = []
+        state["react_trace"] = result.get("trace") or []
+        return state
+    return _write_model_answer(state, display, gaps, web_error, answerer, trace=result.get("trace") or [])
 
 
 def _resuming_confirmation(state: dict[str, Any]) -> bool:
@@ -167,7 +180,7 @@ def _continue_after_confirmation(state: dict[str, Any], ports: dict[str, Any], d
         "item_name_candidates": [],
         "item_name_confirmation_message": "",
     }
-    return _finish_simple(state, run_shared_query(state, narrowed), answerer)
+    return _finish_simple(state, run_private_evidence(state, narrowed), answerer)
 
 
 def _finish_simple(state: dict[str, Any], result: dict[str, Any], answerer) -> dict[str, Any]:
@@ -179,13 +192,36 @@ def _finish_simple(state: dict[str, Any], result: dict[str, Any], answerer) -> d
         state["item_name_confirm_status"] = "need_selection" if len(state["item_name_candidates"]) > 1 else "need_confirmation"
         state["evidence_status"] = "awaiting_user"
         return state
-    if result.get("status") == "retrieval_error":
-        state["final_answer"] = result.get("user_message") or RETRIEVAL_ERROR
+    display = _display_chunks(result)
+    reason = str(result.get("table_reason") or "")
+    if not display and (result.get("status") == "retrieval_error" or reason == "query_failed"):
+        state["final_answer"] = _table_message(reason) or result.get("user_message") or RETRIEVAL_ERROR
         state["evidence_status"] = "retrieval_error"
         state["citations"] = []
         return state
+    if not display:
+        state["final_answer"] = _table_message(reason) or NO_INFO
+        state["evidence_status"] = "unsupported"
+        state["citations"] = []
+        return state
     web_error = str(result.get("web_search_error") or "")
-    return _write_model_answer(state, result.get("chunks") or [], result.get("gaps") or [], web_error, answerer)
+    gaps = list(result.get("gaps") or [])
+    note = _table_message(reason)
+    if note and note not in gaps:
+        gaps.append(note)
+    return _write_model_answer(state, display, gaps, web_error, answerer)
+
+
+def _display_chunks(result: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(result.get("chunks") or []) + table_display_chunks(list(result.get("table_results") or []))
+
+
+def _table_message(reason: str) -> str:
+    return {
+        "query_failed": "结构化数据查询失败，不能据此判断表里是否有记录。",
+        "no_records": "表中没有对应记录。",
+        "metric_unconfirmed": "缺少已确认的指标口径，不能计算。",
+    }.get(reason, "")
 
 
 def _write_model_answer(state, chunks, gaps, web_error, answerer, trace=None):
@@ -458,4 +494,17 @@ def build_ports() -> dict[str, Any]:
         "search_direct": search_direct,
         "search_hyde": search_hyde,
         "search_web": search_web,
+        "query_table": _query_table,
     }
+
+
+def _query_table(question: str) -> dict[str, Any]:
+    from structured.query_table import query_table_data
+
+    try:
+        from structured.indexes import live_index
+
+        indexes = live_index()
+    except Exception:
+        indexes = None
+    return query_table_data(question, indexes=indexes)

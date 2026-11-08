@@ -159,6 +159,22 @@ def _run_node(
     return node(state)
 
 
+def _register_document_row(task_id: str, source_path: Path) -> None:
+    """文档只登记 doc_info。登记失败不打断原来的解析和向量化。"""
+    try:
+        from structured.catalog import register_document
+        from structured.objects import MinioStore
+        from structured.session import open_db
+
+        conn = open_db()
+        try:
+            register_document(conn, MinioStore(), source_path.name, source_path.read_bytes(), upload_task_id=task_id)
+        finally:
+            conn.close()
+    except Exception:
+        logger.warning("文档已继续走原检索链，PostgreSQL 文件登记未完成: %s", source_path.name)
+
+
 def _result_summary(state: ImportGraphState, started: float) -> dict[str, Any]:
     chunks = list(state.get("chunks") or [])
     dense_vector = chunks[0].get("dense_vector") if chunks else None
@@ -202,6 +218,7 @@ def process_task(task_id: str, source_path: Path, work_dir: Path) -> None:
             raise ValueError("文件未通过校验，仅支持 PDF、Markdown 或 Word")
 
         state = _run_node(task_id, state, "minio", "正在保存原始文件", node_upload_minio)
+        _register_document_row(task_id, source_path)
         if state.get("is_pdf_read_enabled"):
             state = _run_node(task_id, state, "parse", "正在将 PDF 解析为 Markdown", node_pdf_to_md)
         else:

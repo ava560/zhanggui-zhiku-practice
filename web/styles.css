@@ -663,6 +663,18 @@ button {
   line-height: 1.65;
 }
 
+.review-note { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.table-review { display: grid; gap: 10px; }
+.table-review label { display: grid; gap: 4px; font-size: 12px; font-weight: 700; }
+.table-review input, .table-review select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-weight: 400; }
+.field-scroll { overflow: auto; }
+.field-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.field-table th, .field-table td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.field-table thead th { color: var(--muted); font-size: 11px; }
+.review-submit { width: auto; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip-row button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+
 .history-section {
   margin-top: 24px;
   padding: 30px;

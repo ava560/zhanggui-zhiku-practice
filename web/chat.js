@@ -453,6 +453,7 @@ ui.input.addEventListener("keydown", (event) => {
 document.querySelector("#newChat").addEventListener("click", async () => {
   try {
     showError("");
+    showJobs(false);
     await createConversation();
   } catch (error) {
     showError(error.message);
@@ -479,6 +480,272 @@ window.addEventListener("popstate", () => {
   const id = new URLSearchParams(location.search).get("id");
   selectConversation(id, { updateHistory: false });
 });
+
+const jobStatus = { never: "尚未运行", running: "运行中", succeeded: "成功", failed: "失败" };
+let jobCatalog = { jobs: [], codes: [], documents: [], openId: null, preview: "" };
+
+function showJobs(open) {
+  document.querySelector("#jobsView").hidden = !open;
+  ui.area.hidden = open;
+  document.querySelector(".composer-wrap").hidden = open;
+  document.querySelector("#openJobs").classList.toggle("is-active", open);
+  document.querySelector(".current-chat-label").textContent = open ? "小灵 / 每日任务" : "小灵 / 金融知识";
+  if (open) {
+    ui.title.textContent = "定时任务";
+    loadJobs().catch((error) => showError(error.message));
+  } else {
+    ui.title.textContent = state.conversations.find((item) => item.conversation_id === state.activeId)?.title || "新对话";
+  }
+}
+
+document.querySelector("#openJobs").addEventListener("click", () => {
+  const opening = document.querySelector("#jobsView").hidden;
+  showJobs(opening);
+  if (opening) setSidebar(false);
+});
+document.querySelector("#openJobDialog").addEventListener("click", () => {
+  fillJobDialog();
+  document.querySelector("#jobDialog").showModal();
+});
+document.querySelector("#cancelJob").addEventListener("click", () => document.querySelector("#jobDialog").close());
+document.querySelector("#jobForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const docIds = [...document.querySelectorAll("#jobDocs input:checked")].map((item) => item.value);
+  try {
+    await api("/api/data-jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        name: document.querySelector("#jobName").value.trim(),
+        sop_ref: document.querySelector("#jobSop").value.trim(),
+        description: document.querySelector("#jobDescription").value.trim(),
+        code_id: document.querySelector("#jobCode").value,
+        run_at: document.querySelector("#jobRunAt").value.trim(),
+        doc_ids: docIds,
+      }),
+    });
+    document.querySelector("#jobDialog").close();
+    event.target.reset();
+    await loadJobs();
+  } catch (error) {
+    showError(error.message);
+  }
+});
+
+function fillJobDialog() {
+  const docs = document.querySelector("#jobDocs");
+  docs.replaceChildren();
+  if (!jobCatalog.documents.length) {
+    docs.textContent = "还没有已登记的文件。";
+  }
+  for (const doc of jobCatalog.documents) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = doc.doc_id;
+    label.append(input, document.createTextNode(` ${doc.source_file} · ${doc.status}`));
+    docs.append(label);
+  }
+  const code = document.querySelector("#jobCode");
+  code.replaceChildren();
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "不指定，不会运行";
+  code.append(empty);
+  for (const item of jobCatalog.codes) {
+    const option = document.createElement("option");
+    option.value = item.code_id;
+    option.textContent = item.code_id;
+    code.append(option);
+  }
+}
+
+async function loadJobs() {
+  jobCatalog = { ...jobCatalog, ...(await api("/api/data-jobs")) };
+  const list = document.querySelector("#jobList");
+  const detail = document.querySelector("#jobDetail");
+  const opened = (jobCatalog.jobs || []).find((job) => job.job_id === jobCatalog.openId);
+  list.hidden = Boolean(opened);
+  detail.hidden = !opened;
+  if (opened) {
+    await renderJobDetail(opened.job_id);
+    return;
+  }
+  list.replaceChildren();
+  if (!(jobCatalog.jobs || []).length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = "还没有定时任务。";
+    list.append(empty);
+    return;
+  }
+  for (const job of jobCatalog.jobs) {
+    const card = document.createElement("article");
+    card.className = `job-card ${job.last_status}`;
+    const title = document.createElement("h3");
+    title.textContent = job.name;
+    const pill = document.createElement("span");
+    pill.className = "status-pill";
+    pill.textContent = jobStatus[job.last_status] || job.last_status;
+    title.append(pill);
+    const meta = document.createElement("p");
+    meta.className = "job-meta";
+    meta.textContent = `${job.sop_ref} · 每天 ${job.run_at} · 代码 ${job.code_id || "未指定"}`;
+    const actions = document.createElement("div");
+    actions.className = "chip-row";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "desk-ghost";
+    open.textContent = "打开";
+    open.addEventListener("click", () => {
+      jobCatalog.openId = job.job_id;
+      jobCatalog.preview = "";
+      loadJobs().catch((error) => showError(error.message));
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "desk-ghost";
+    remove.textContent = "取消";
+    remove.addEventListener("click", async () => {
+      await api(`/api/data-jobs/${job.job_id}`, { method: "DELETE" });
+      await loadJobs();
+    });
+    actions.append(open, remove);
+    card.append(title, meta, actions);
+    if (job.last_error) {
+      const error = document.createElement("p");
+      error.className = "job-error";
+      error.textContent = job.last_error;
+      card.append(error);
+    }
+    list.append(card);
+  }
+}
+
+async function renderJobDetail(jobId) {
+  const job = await api(`/api/data-jobs/${jobId}`);
+  const detail = document.querySelector("#jobDetail");
+  detail.replaceChildren();
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "desk-ghost";
+  back.textContent = "返回全部任务";
+  back.addEventListener("click", () => {
+    jobCatalog.openId = null;
+    jobCatalog.preview = "";
+    loadJobs().catch((error) => showError(error.message));
+  });
+  const title = document.createElement("h2");
+  title.textContent = job.name;
+  const pill = document.createElement("span");
+  pill.className = "status-pill";
+  pill.textContent = jobStatus[job.last_status] || job.last_status;
+  title.append(pill);
+  const grid = document.createElement("div");
+  grid.className = "detail-grid";
+  const description = document.createElement("label");
+  description.append(document.createTextNode("任务描述"));
+  const descriptionInput = document.createElement("textarea");
+  descriptionInput.maxLength = 200;
+  descriptionInput.value = job.description || "";
+  description.append(descriptionInput);
+  const time = document.createElement("label");
+  time.append(document.createTextNode("每天运行"));
+  const timeInput = document.createElement("input");
+  timeInput.type = "time";
+  timeInput.value = job.run_at;
+  time.append(timeInput);
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "desk-solid";
+  save.textContent = "保存修改";
+  save.addEventListener("click", async () => {
+    await api(`/api/data-jobs/${job.job_id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ description: descriptionInput.value.trim(), run_at: timeInput.value }),
+    });
+    await loadJobs();
+  });
+  grid.append(description, time);
+  const files = document.createElement("div");
+  const filesLabel = document.createElement("p");
+  filesLabel.textContent = "涉及文件";
+  const fileRow = document.createElement("div");
+  fileRow.className = "chip-row";
+  for (const file of job.files || []) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "desk-ghost";
+    chip.textContent = file.source_file || file.error || file.doc_id;
+    chip.addEventListener("click", () => {
+      jobCatalog.preview = `file:${file.doc_id}`;
+      renderJobDetail(jobId).catch((error) => showError(error.message));
+    });
+    fileRow.append(chip);
+  }
+  if (!fileRow.childElementCount) fileRow.textContent = "还没有选择文件。";
+  files.append(filesLabel, fileRow);
+  const codeWrap = document.createElement("div");
+  const codeChip = document.createElement("button");
+  codeChip.type = "button";
+  codeChip.className = "desk-ghost";
+  codeChip.textContent = job.code_id || "未指定代码";
+  codeChip.addEventListener("click", () => {
+    jobCatalog.preview = "code";
+    renderJobDetail(jobId).catch((error) => showError(error.message));
+  });
+  codeWrap.append(codeChip);
+  const preview = document.createElement("div");
+  preview.className = "preview";
+  if (jobCatalog.preview.startsWith("file:")) {
+    const file = (job.files || []).find((item) => item.doc_id === jobCatalog.preview.slice(5));
+    preview.append(renderFilePreview(file));
+  } else if (jobCatalog.preview === "code") {
+    const block = document.createElement("pre");
+    block.className = "code-view";
+    block.textContent = job.code_registered ? job.code_preview : "代码未登记，不会运行";
+    preview.append(block);
+  }
+  detail.append(back, title, grid, save, files, codeWrap, preview);
+}
+
+function renderFilePreview(file) {
+  const wrap = document.createElement("div");
+  if (!file) return wrap;
+  if (file.error) {
+    wrap.textContent = file.error;
+    return wrap;
+  }
+  const summary = document.createElement("p");
+  summary.className = "job-meta";
+  summary.textContent = `${file.source_file} · 表 ${file.table_name}`;
+  wrap.append(summary);
+  const rows = file.rows || [];
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "这张表目前没有数据行。";
+    wrap.append(empty);
+    return wrap;
+  }
+  const table = document.createElement("table");
+  const head = document.createElement("tr");
+  for (const name of file.columns || Object.keys(rows[0])) {
+    const cell = document.createElement("th");
+    cell.textContent = name;
+    head.append(cell);
+  }
+  table.append(head);
+  for (const row of rows) {
+    const line = document.createElement("tr");
+    for (const name of file.columns || Object.keys(row)) {
+      const cell = document.createElement("td");
+      cell.textContent = row[name] ?? "";
+      line.append(cell);
+    }
+    table.append(line);
+  }
+  wrap.append(table);
+  return wrap;
+}
 
 document.querySelector("#openMemory").addEventListener("click", async () => {
   const panel = document.querySelector("#memoryPanel");

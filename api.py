@@ -129,6 +129,7 @@ def config() -> JSONResponse:
     return _json(
         {
             "allowed_extensions": sorted(web_server.ALLOWED_EXTENSIONS),
+            "table_extensions": [".csv", ".xls", ".xlsm", ".xlsx"],
             "max_upload_mb": MAX_UPLOAD_BYTES // 1024 // 1024,
             "stages": STAGES,
         }
@@ -382,6 +383,106 @@ async def stream_message(conversation_id: str, request: Request) -> Response:
             path="/",
         )
     return response
+
+
+def _service_error(exc: Exception) -> JSONResponse:
+    from structured.catalog import CatalogError
+    from structured.db import DatabaseConfigError
+    from structured.jobs import JobError
+
+    if isinstance(exc, (CatalogError, JobError, ValueError)):
+        return _json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+    if isinstance(exc, DatabaseConfigError):
+        return _json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
+    logger.exception("结构化数据接口失败")
+    return _json({"error": "结构化数据查询失败，不能据此判断表里是否有记录。"}, HTTPStatus.BAD_GATEWAY)
+
+
+@app.post("/api/table-imports", status_code=HTTPStatus.ACCEPTED)
+async def stage_table_import(request: Request, filename: str = "", sheet_name: str = "") -> JSONResponse:
+    from structured.http_api import stage_upload
+    from structured.sheets import is_table_file
+
+    safe_name = safe_filename(filename)
+    if not safe_name or not is_table_file(safe_name):
+        return _json({"error": "表格文件只接受 xlsx、xlsm、xls 或 csv"}, HTTPStatus.BAD_REQUEST)
+    data = await request.body()
+    if not data:
+        return _json({"error": "上传内容为空"}, HTTPStatus.BAD_REQUEST)
+    if len(data) > MAX_UPLOAD_BYTES:
+        return _json({"error": "文件超过大小限制"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+    try:
+        return _json(stage_upload(safe_name, data, sheet_name or None), HTTPStatus.ACCEPTED)
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/table-imports/{import_version_id}/confirm")
+async def confirm_table_import(import_version_id: str, request: Request) -> JSONResponse:
+    from structured.http_api import publish_upload
+
+    if not re.fullmatch(r"iv_[0-9a-f]{32}", import_version_id):
+        return _json({"error": "导入版本不存在"}, HTTPStatus.NOT_FOUND)
+    try:
+        payload = json.loads(await request.body() or b"{}")
+        if not isinstance(payload, dict):
+            raise ValueError("请求内容必须是 JSON 对象")
+        return _json(publish_upload(import_version_id, payload))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.get("/api/data-jobs")
+def data_jobs() -> JSONResponse:
+    from structured.http_api import jobs_list
+
+    try:
+        return _json(jobs_list())
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/data-jobs", status_code=HTTPStatus.CREATED)
+async def create_data_job(request: Request) -> JSONResponse:
+    from structured.http_api import jobs_save
+
+    try:
+        payload = _read_json(await request.body())
+        return _json(jobs_save(payload), HTTPStatus.CREATED)
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.get("/api/data-jobs/{job_id}")
+def data_job_detail(job_id: str) -> JSONResponse:
+    from structured.http_api import jobs_preview
+
+    try:
+        return _json(jobs_preview(job_id))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.patch("/api/data-jobs/{job_id}")
+async def patch_data_job(job_id: str, request: Request) -> JSONResponse:
+    from structured.http_api import jobs_update
+
+    try:
+        payload = _read_json(await request.body())
+        return _json(jobs_update(job_id, payload))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.delete("/api/data-jobs/{job_id}")
+def remove_data_job(job_id: str) -> JSONResponse:
+    from structured.http_api import jobs_delete
+
+    try:
+        jobs_delete(job_id)
+        return _json({"removed": True})
+    except Exception as exc:
+        return _service_error(exc)
 
 
 def main() -> None:

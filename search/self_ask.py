@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from search.citations import WEB_ERROR
-from search.shared_query import run_shared_query
+from search.private_evidence import run_private_evidence
 
 
 FollowupDecider = Callable[..., str | None]
@@ -25,6 +25,8 @@ def _pack_from_query(task_id: str, task_type: str, result: dict[str, Any]) -> di
         "item_name_candidates": list(result.get("item_name_candidates") or []),
         "item_name_confirmation_message": result.get("item_name_confirmation_message") or "",
         "web_search_error": result.get("web_search_error") or "",
+        "table_results": list(result.get("table_results") or []),
+        "table_reason": result.get("table_reason") or "",
     }
 
 
@@ -39,7 +41,7 @@ def run_private_self_ask(
     base = dict(state)
     base["current_question"] = task["question"]
     base.pop("question_rewritten", None)
-    pack = _pack_from_query(str(task.get("task_id") or ""), "private_kb", run_shared_query(base, ports))
+    pack = _pack_from_query(str(task.get("task_id") or ""), "private_kb", run_private_evidence(base, ports))
     if pack["awaiting_user_confirmation"] or pack["status"] == "retrieval_error":
         return pack
     while len(pack["followups"]) < 2:
@@ -49,13 +51,16 @@ def run_private_self_ask(
         follow_state = dict(base)
         follow_state["current_question"] = nxt
         follow_state.pop("question_rewritten", None)
-        follow = run_shared_query(follow_state, ports)
+        follow = run_private_evidence(follow_state, ports)
         pack["followups"].append({
             "question": nxt,
             "status": follow.get("status"),
             "chunks": list(follow.get("chunks") or []),
         })
         pack["chunks"].extend(follow.get("chunks") or [])
+        pack["table_results"].extend(follow.get("table_results") or [])
+        if follow.get("table_reason") == "query_failed":
+            pack["table_reason"] = "query_failed"
         if follow.get("awaiting_user_confirmation"):
             pack["awaiting_user_confirmation"] = True
             pack["status"] = "awaiting_user"

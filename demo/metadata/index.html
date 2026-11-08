@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>四张元数据表</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <p class="kicker">检查稿 · 只在本页</p>
+        <h1>四张元数据表</h1>
+      </div>
+      <nav class="jumps" aria-label="四张表">
+        <a href="#table-info">table_info</a>
+        <a href="#column-info">column_info</a>
+        <a href="#metric-info">metric_info</a>
+        <a href="#doc-info">doc_info</a>
+      </nav>
+    </header>
+    <main>
+      <section class="note" aria-label="当前理解">
+        <p>这四张表只登记说明。青岚申赎、澄江条款、南桥名册、岚桥备付金的业务行不在这里。</p>
+        <ul>
+          <li><code>table_info</code> 记库里的业务表：表名、事实表或维度表、业务描述，以及这张表全部字段名。类型和说明不写在这一行。</li>
+          <li><code>column_info</code> 一行一个实际字段：名称、类型、角色、别名、描述、所属表。字段角色暂分为日期、维度、度量、属性。</li>
+          <li><code>metric_info</code> 记指标：名称、业务描述、别名、关联字段、计算公式。公式只展示，不在这页计算。</li>
+          <li><code>doc_info</code> 记来源文档：名称、描述、格式、关联的每日任务。xls、xlsx、xlsm、csv 视为表格格式，并在该行记下每个字段和描述。md、pdf 不记字段。</li>
+        </ul>
+      </section>
+      <div id="app"></div>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

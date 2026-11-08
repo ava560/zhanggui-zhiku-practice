@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>灵库 · 演示</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主内容</a>
+    <div class="app" id="app">
+      <aside class="sidebar" id="sidebar" aria-label="导航">
+        <div class="sidebar-top">
+          <button class="brand" id="brandHome" type="button">
+            灵库
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
+          </button>
+          <button class="icon-button mobile-close" id="closeSidebar" type="button" aria-label="关闭菜单">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+          </button>
+        </div>
+
+        <nav class="nav" aria-label="功能">
+          <button class="nav-item is-active" id="openAsk" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            新聊天
+          </button>
+          <button class="nav-item" id="openJobs" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 8v5l3 2" /></svg>
+            定时任务
+          </button>
+          <button class="nav-item" id="openSkills" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5h5l-4 3 2 5-5-3-5 3 2-5-4-3h5z" /></svg>
+            技能
+          </button>
+          <button class="nav-item" id="openPlugins" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8V4h4v4h4v4h4v4h-4v4h-4v-4H8v-4H4V8h4z" /></svg>
+            插件
+          </button>
+        </nav>
+
+        <p class="side-label">最近</p>
+        <div class="recent-list" id="recentList"></div>
+
+        <div class="user-wrap">
+          <div class="user-menu" id="userMenu" hidden>
+            <button type="button" data-view="memory">个性化</button>
+            <button type="button" data-view="upload">上传文件</button>
+            <button type="button" data-view="database">数据库</button>
+            <button type="button" data-view="archive">文件档案</button>
+          </div>
+          <button class="sidebar-user" id="openUserMenu" type="button" aria-expanded="false" aria-controls="userMenu">
+            <span class="avatar" aria-hidden="true">灵</span>
+            <span class="user-copy"><strong>数据台</strong><small>演示 · 虚拟数据</small></span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="scrim" id="scrim" hidden></div>
+
+      <main class="main" id="main">
+        <header class="topbar">
+          <button class="icon-button menu-button" id="openSidebar" type="button" aria-label="显示/隐藏侧边栏" title="显示/隐藏侧边栏（Ctrl+Shift+S）">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h16" /></svg>
+          </button>
+          <div class="topbar-copy">
+            <span id="viewKicker">对话</span>
+            <strong id="viewTitle">灵库</strong>
+          </div>
+          <span class="demo-pill">未连接数据库</span>
+        </header>
+
+        <section class="ask-view" id="askView">
+          <div class="messages" id="messages" aria-live="polite">
+            <div class="welcome" id="welcome">
+              <h1>先看档案，再回答。</h1>
+              <p class="welcome-copy">只使用已登记文件的表名、简介和字段说明，然后读取对应的表。</p>
+              <div class="suggestions" id="suggestions"></div>
+            </div>
+          </div>
+          <form class="composer" id="composer">
+            <p class="inline-error" id="formError" role="alert" hidden></p>
+            <div class="composer-shell">
+              <label class="sr-only" for="question">输入需求</label>
+              <textarea id="question" rows="1" maxlength="4000" placeholder="询问灵库" required></textarea>
+              <div class="composer-bar">
+                <label class="web-toggle">
+                  <input id="webSearch" type="checkbox" checked /> 联网搜索
+                </label>
+                <span class="composer-hint">虚拟数据 · Enter 发送</span>
+                <button type="submit" aria-label="发送">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6M6 11l6-6 6 6" /></svg>
+                </button>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel-view" id="jobsView" hidden>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h1>定时任务</h1>
+                <p>按 SOP 每天运行已经指定的代码。演示里用「演示运行」代替等到钟点，对话不会跑这些代码。</p>
+              </div>
+              <button class="solid" id="openJobDialog" type="button">设置任务</button>
+            </div>
+            <div class="job-list" id="jobList" aria-live="polite"></div>
+            <article class="job-detail" id="jobDetail" hidden></article>
+          </div>
+        </section>
+
+        <section class="panel-view" id="skillsView" hidden>
+          <div class="panel">
+            <h1>技能</h1>
+            <p class="lead">点一个技能，会把它写成一条可以发送的需求。</p>
+            <div class="card-grid">
+              <button class="plain-card" type="button" data-prompt="按产品汇总青岚的申购金额">按字段汇总<small>把一张表按产品或网点加总</small></button>
+              <button class="plain-card" type="button" data-prompt="青岚稳健180昨天申购了多少">按档案查表<small>先看表名和字段，再查记录</small></button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-view" id="pluginsView" hidden>
+          <div class="panel">
+            <h1>插件</h1>
+            <p class="lead">对话框里的联网搜索和这里是同一个开关。演示不连接真实插件。</p>
+            <div class="card-grid">
+              <article class="plain-card static">
+                <strong>联网搜索</strong>
+                <small id="pluginWebState">当前已打开</small>
+                <button class="ghost" id="toggleWeb" type="button">切换联网搜索</button>
+              </article>
+              <article class="plain-card static">
+                <strong>百炼检索</strong>
+                <small>演示未连接</small>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-view" id="memoryView" hidden>
+          <div class="panel">
+            <h1>个性化</h1>
+            <p class="lead">长期记忆只保存你在这里写下的内容。普通提问不会自动记住。</p>
+            <form class="inline-form" id="memoryForm">
+              <label class="sr-only" for="memoryInput">要记住的内容</label>
+              <input id="memoryInput" maxlength="200" placeholder="写下要记住的偏好" required />
+              <button class="solid" type="submit">保存</button>
+            </form>
+            <ul class="memory-list" id="memoryList"></ul>
+          </div>
+        </section>
+
+        <section class="panel-view" id="uploadView" hidden>
+          <div class="panel">
+            <h1>上传文件</h1>
+            <p class="lead">演示只记下文件名，不写入数据库。字段说明由维护人员在文件档案里看。</p>
+            <input id="uploadInput" type="file" multiple />
+            <ul class="memory-list" id="uploadList"></ul>
+          </div>
+        </section>
+
+        <section class="panel-view" id="databaseView" hidden>
+          <div class="panel">
+            <h1>数据库</h1>
+            <p class="lead">这里是已登记的表。点一张表可以打开文件档案。</p>
+            <div id="databaseList"></div>
+          </div>
+        </section>
+
+        <section class="panel-view" id="archiveView" hidden>
+          <div class="archive-layout">
+            <div class="catalog-list" id="catalogList" aria-label="已登记文件"></div>
+            <article class="catalog-detail" id="catalogDetail"></article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="job-dialog" id="jobDialog" aria-labelledby="jobDialogTitle">
+      <form method="dialog" id="jobForm">
+        <h2 id="jobDialogTitle">设置每日任务</h2>
+        <p class="dialog-copy">一条任务绑定一份演示 SOP 和一段指定代码。不填写代码时，任务会保存，但不会运行。</p>
+        <label>
+          任务名称
+          <input name="name" maxlength="40" required placeholder="例如：青岚收盘核对" />
+        </label>
+        <label>
+          SOP 标识
+          <input name="sop" maxlength="40" required placeholder="例如：SOP-DEMO-04" />
+        </label>
+        <label>
+          任务描述
+          <textarea name="description" maxlength="200" placeholder="这次更新要做什么"></textarea>
+        </label>
+        <label>
+          每天运行
+          <input name="runAt" type="time" value="09:00" required />
+        </label>
+        <fieldset class="file-picks">
+          <legend>涉及文件</legend>
+          <label><input type="checkbox" name="files" value="qinglan" /> 青岚日申赎.xlsx</label>
+          <label><input type="checkbox" name="files" value="chengjiang" /> 澄江产品条款.csv</label>
+          <label><input type="checkbox" name="files" value="nanqiao" /> 南桥网点名册.md</label>
+          <label><input type="checkbox" name="files" value="lanqiao" /> 岚桥备付金说明.xlsx</label>
+        </fieldset>
+        <label>
+          指定代码
+          <select name="code" id="codeSelect"></select>
+        </label>
+        <div class="dialog-actions">
+          <button class="ghost" id="cancelJob" type="button">取消</button>
+          <button class="solid" value="save" type="submit">保存任务</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="./app.js"></script>
+  </body>
+</html>

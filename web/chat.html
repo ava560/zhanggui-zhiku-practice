@@ -35,6 +35,7 @@
           <ul id="memoryList"></ul>
         </div>
         <div class="sidebar-bottom">
+          <button class="sidebar-tool" id="openJobs" type="button">定时任务</button>
           <button class="sidebar-tool" id="openMemory" type="button">个性化</button>
           <a href="/" class="upload-link"><span aria-hidden="true">↗</span> 文档入库</a>
           <span class="sidebar-caption">每段对话独立保存</span>
@@ -51,6 +52,20 @@
           <div class="current-chat"><span class="current-chat-label">小灵 / 金融知识</span><strong id="currentTitle">新对话</strong></div>
           <span class="save-indicator"><i aria-hidden="true"></i> 自动保存</span>
         </header>
+
+        <section class="desk-view" id="jobsView" hidden>
+          <div class="desk-panel">
+            <div class="desk-head">
+              <div>
+                <h1>定时任务</h1>
+                <p>按 SOP 每天运行已经指定的代码。钟点只保存，对话不会运行这些代码。</p>
+              </div>
+              <button class="desk-solid" id="openJobDialog" type="button">设置任务</button>
+            </div>
+            <div class="job-list" id="jobList" aria-live="polite"></div>
+            <article class="job-detail" id="jobDetail" hidden></article>
+          </div>
+        </section>
 
         <section class="messages-area" id="messagesArea" aria-live="polite" aria-label="聊天消息">
           <div class="welcome" id="welcome">
@@ -87,6 +102,25 @@
         </div>
       </main>
     </div>
+    <dialog class="job-dialog" id="jobDialog" aria-labelledby="jobDialogTitle">
+      <form id="jobForm">
+        <h2 id="jobDialogTitle">设置每日任务</h2>
+        <p class="dialog-copy">一条任务绑定 SOP 标识和已登记的代码。不指定代码时任务会保存，但不会运行。这里不能填写代码正文或脚本路径。</p>
+        <label>任务名称 <input id="jobName" name="name" maxlength="80" required /></label>
+        <label>SOP 标识 <input id="jobSop" name="sop" maxlength="80" required /></label>
+        <label>任务描述 <textarea id="jobDescription" name="description" maxlength="200"></textarea></label>
+        <label>每天运行 <input id="jobRunAt" name="runAt" type="time" value="09:00" required /></label>
+        <fieldset class="file-picks">
+          <legend>涉及文件</legend>
+          <div id="jobDocs"></div>
+        </fieldset>
+        <label>指定代码 <select id="jobCode" name="code"></select></label>
+        <div class="dialog-actions">
+          <button class="desk-ghost" id="cancelJob" type="button">取消</button>
+          <button class="desk-solid" type="submit">保存任务</button>
+        </div>
+      </form>
+    </dialog>
     <script src="/chat.js" defer></script>
   </body>
 </html>

@@ -30,7 +30,7 @@
           <p class="eyebrow">灵库 / 资料工作台</p>
           <h1 id="pageTitle">让产品资料，<br /><span>随问随答。</span></h1>
           <p class="lede">
-            上传 PDF 或 Markdown，灵库会整理文档并建立可检索的资料库。
+            上传 PDF、Markdown 或 Word 会进入文档检索。表格文件要在确认字段后写入 PostgreSQL。
             入库后，直接向小灵提问，也能继续追问和比较产品。
           </p>
         </section>
@@ -42,11 +42,11 @@
                 <p class="section-label">第一步 / 添加资料</p>
                 <h2 id="uploadTitle">选择产品文档</h2>
               </div>
-              <span class="format-badge">PDF / MD / Word</span>
+              <span class="format-badge">PDF / MD / Word / 表格</span>
             </div>
 
             <div class="drop-zone" id="dropZone" tabindex="0" role="button" aria-controls="fileInput">
-              <input id="fileInput" type="file" accept=".pdf,.md,.doc,.docx,application/pdf,text/markdown,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple hidden />
+              <input id="fileInput" type="file" accept=".pdf,.md,.doc,.docx,.csv,.xls,.xlsx,.xlsm,application/pdf,text/markdown,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple hidden />
               <span class="drop-icon" aria-hidden="true">
                 <svg viewBox="0 0 48 48">
                   <path d="M11 8h18l8 8v24H11z" />

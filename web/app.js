@@ -98,7 +98,10 @@ function renderQueue() {
 
 function addFiles(fileList) {
   const maxBytes = state.config.max_upload_mb * 1024 * 1024;
-  const allowed = new Set(state.config.allowed_extensions);
+  const allowed = new Set([
+    ...(state.config.allowed_extensions || []),
+    ...(state.config.table_extensions || []),
+  ]);
   for (const file of fileList) {
     const extension = file.name.includes(".") ? `.${file.name.split(".").pop().toLowerCase()}` : "";
     if (!allowed.has(extension)) {
@@ -151,7 +154,7 @@ function renderSelectedTask() {
     elements.progressLabel.textContent = "等待开始";
     elements.progressValue.textContent = "0%";
     elements.progressBar.style.width = "0%";
-    elements.resultPanel.hidden = true;
+    if (!state.tableReview) elements.resultPanel.hidden = true;
     renderPipeline(null);
     return;
   }
@@ -173,6 +176,7 @@ function renderSelectedTask() {
   elements.progressValue.textContent = `${task.progress}%`;
   elements.progressBar.style.width = `${task.progress}%`;
   renderPipeline(task);
+  if (state.tableReview) return;
 
   if (task.status === "completed" && task.result) {
     const result = task.result;
@@ -252,10 +256,14 @@ async function pollTasks() {
   }
 }
 
-function uploadFile(file) {
+function uploadFile(file, sheetName) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/tasks?filename=${encodeURIComponent(file.name)}`);
+    const extension = file.name.includes(".") ? `.${file.name.split(".").pop().toLowerCase()}` : "";
+    const table = new Set(state.config.table_extensions || []).has(extension);
+    const target = table ? "/api/table-imports" : "/api/tasks";
+    const sheet = sheetName ? `&sheet_name=${encodeURIComponent(sheetName)}` : "";
+    xhr.open("POST", `${target}?filename=${encodeURIComponent(file.name)}${sheet}`);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.responseType = "json";
     xhr.onload = () => {
@@ -277,7 +285,13 @@ async function startUpload() {
   for (const file of pending) {
     try {
       const task = await uploadFile(file);
+      if (task.review || task.need_sheet || task.duplicate) {
+        showTableReview(task, file);
+        accepted += 1;
+        continue;
+      }
       accepted += 1;
+      state.tableReview = null;
       state.selectedTaskId = task.id;
       state.tasks = [task, ...state.tasks.filter((item) => item.id !== task.id)];
       renderTasks();
@@ -291,6 +305,93 @@ async function startUpload() {
   renderQueue();
   if (accepted) toast(`${accepted} 个文件已进入入库队列`);
   await pollTasks();
+}
+
+function showTableReview(draft, file) {
+  state.tableReview = draft;
+  state.tableFile = file || state.tableFile;
+  elements.resultPanel.hidden = false;
+  if (draft.need_sheet) {
+    const buttons = (draft.sheets || []).map((name) => `<button type="button" data-sheet="${escapeHtml(name)}">${escapeHtml(name)}</button>`).join("");
+    elements.resultPanel.innerHTML = `<h3>选择工作表</h3><p class="review-note">这份表格有多张表。选定一张后才会登记，一文件只建一张业务表。</p><div class="chip-row">${buttons}</div>`;
+    elements.resultPanel.querySelectorAll("[data-sheet]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        try {
+          const next = await uploadFile(state.tableFile, button.dataset.sheet);
+          showTableReview(next, state.tableFile);
+        } catch (error) {
+          toast(error.message, true);
+        }
+      });
+    });
+    return;
+  }
+  if (draft.duplicate) {
+    elements.resultPanel.innerHTML = "<p>原件、工作表和导入配置完全相同，已沿用现有版本。</p>";
+    return;
+  }
+  const roles = ["维度", "度量", "时间", "主键", "属性"];
+  const types = ["text", "bigint", "numeric", "boolean", "date", "timestamptz"];
+  const fields = (draft.columns || []).map((column, index) => {
+    const label = column.aliases?.[0] || column.column_name;
+    return `
+      <tr>
+        <th>${escapeHtml(label)}</th>
+        <td><input data-field="description" data-index="${index}" value="${escapeHtml(column.description)}" /></td>
+        <td><select data-field="role" data-index="${index}">${roles.map((role) => `<option ${role === column.role ? "selected" : ""}>${role}</option>`).join("")}</select></td>
+        <td><select data-field="data_type" data-index="${index}">${types.map((type) => `<option ${type === column.data_type ? "selected" : ""}>${type}</option>`).join("")}</select></td>
+        <td><label><input data-field="value_index" data-index="${index}" type="checkbox" /> 值索引</label></td>
+      </tr>`;
+  }).join("");
+  elements.resultPanel.innerHTML = `
+    <h3>确认字段后才发布</h3>
+    <p class="review-note">${escapeHtml(draft.source_file)} · ${draft.row_count ?? 0} 行。说明里的数字不会变成表中记录。数字列不会自动当成度量，值索引默认关闭。</p>
+    <form id="tableConfirm" class="table-review">
+      <label>文件简介 <input name="summary" required /></label>
+      <label>表简介 <input name="table_summary" required /></label>
+      <label>表角色 <select name="table_role"><option>事实表</option><option>维度表</option></select></label>
+      <div class="field-scroll">
+        <table class="field-table">
+          <thead><tr><th>原列名</th><th>说明</th><th>角色</th><th>类型</th><th>索引</th></tr></thead>
+          <tbody>${fields}</tbody>
+        </table>
+      </div>
+      <button class="primary-action review-submit" type="submit">确认发布</button>
+    </form>`;
+  document.querySelector("#tableConfirm").addEventListener("submit", submitTableConfirm);
+}
+
+async function submitTableConfirm(event) {
+  event.preventDefault();
+  const draft = state.tableReview;
+  const form = event.currentTarget;
+  const columns = (draft.columns || []).map((column, index) => ({
+    column_id: column.column_id,
+    description: form.querySelector(`[data-field="description"][data-index="${index}"]`).value,
+    role: form.querySelector(`[data-field="role"][data-index="${index}"]`).value,
+    data_type: form.querySelector(`[data-field="data_type"][data-index="${index}"]`).value,
+    aliases: column.aliases || [],
+    value_index: form.querySelector(`[data-field="value_index"][data-index="${index}"]`).checked,
+  }));
+  const payload = {
+    summary: form.summary.value,
+    table_summary: form.table_summary.value,
+    table_role: form.table_role.value,
+    columns,
+    metrics: [],
+  };
+  const response = await fetch(`/api/table-imports/${draft.import_version_id}/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    toast(result.error || "发布失败", true);
+    return;
+  }
+  state.tableReview = { published: true };
+  elements.resultPanel.innerHTML = `<p>已发布 ${escapeHtml(result.source_file)}，表 ${escapeHtml(result.table_name)}，${result.row_count} 行。</p>`;
 }
 
 async function initialize() {
