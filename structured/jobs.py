@@ -1,11 +1,16 @@
-"""每日任务保存在 data_job。钟点可以保存；Q-004 确认前不自动跑。"""
+"""每日任务保存在 data_job。到点按北京时间运行任务自己的代码。"""
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import sys
 import uuid
-from datetime import date, datetime, timezone
-from typing import Any, Callable
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterator
+from zoneinfo import ZoneInfo
 
 from psycopg import Connection
 
@@ -19,16 +24,52 @@ class JobError(ValueError):
 
 
 class JobContext:
-    def __init__(self, conn: Connection, indexes: Any, doc_id: str) -> None:
+    def __init__(
+        self,
+        conn: Connection,
+        indexes: Any,
+        doc_id: str,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        deadline: datetime | None = None,
+        code_id: str = "",
+        job_id: str = "",
+        code_version_id: str = "",
+        lineage: Any = None,
+    ) -> None:
         self.conn = conn
         self.indexes = indexes
         self.doc_id = doc_id
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.deadline = deadline
+        self.code_id = code_id
+        self.job_id = job_id
+        self.code_version_id = code_version_id
+        self.lineage = lineage
+        self.reads: list[dict[str, str]] = []
+        self.output_version = ""
 
     def replace_rows(self, rows: list[dict[str, Any]], *, doc_id: str | None = None) -> dict[str, Any]:
+        if self.deadline is not None and self.clock() >= self.deadline:
+            raise JobError("运行超过 30 分钟")
         target = doc_id or self.doc_id
         if target != self.doc_id:
             raise JobError("更新函数只能写入自己声明的文件")
-        return replace_rows(self.conn, self.indexes, target, rows)
+        inputs, unresolved = _reads_as_inputs(self.conn, self.reads)
+        saved = replace_rows(
+            self.conn,
+            self.indexes,
+            target,
+            rows,
+            lineage=self.lineage,
+            code_id=self.code_id,
+            job_id=self.job_id,
+            code_version_id=self.code_version_id,
+            inputs=inputs if self.reads else None,
+            unresolved=unresolved if self.reads else None,
+        )
+        self.output_version = str(saved.get("data_version_id") or "")
+        return saved
 
 
 def list_jobs(conn: Connection) -> list[dict[str, Any]]:
@@ -182,9 +223,16 @@ def run_job(
     today: date | None = None,
     store: Any = None,
     fixer: Any = None,
+    clock: Callable[[], datetime] | None = None,
+    narrator: Any = None,
+    lineage: Any = None,
 ) -> dict[str, Any]:
+    from structured.schema import ensure_schema
+
+    ensure_schema(conn)
     job = get_job(conn, job_id)
-    current_day = today or datetime.now(timezone.utc).date()
+    clock = clock or (lambda: datetime.now(timezone.utc))
+    current_day = today or _beijing(clock()).date()
     if job["last_success_on"] == current_day.isoformat():
         return job
     code_id = _bound_code(job)
@@ -208,13 +256,38 @@ def run_job(
     if not doc_id:
         _mark_failed(conn, job_id, "更新函数没有声明文件")
         return get_job(conn, job_id)
+    started = clock()
+    context = JobContext(
+        conn,
+        indexes,
+        doc_id,
+        clock=clock,
+        deadline=started + timedelta(minutes=30),
+        code_id=code_id,
+        job_id=job_id,
+        code_version_id=_ready_version_id(conn, code_id),
+        lineage=lineage,
+    )
+    loaded_before = set(sys.modules)
     conn.execute(
-        "UPDATE data_job SET last_status = 'running', last_error = NULL WHERE job_id = %s",
-        (job_id,),
+        """
+        UPDATE data_job
+        SET last_status = 'running', last_error = NULL, run_started_at = %s
+        WHERE job_id = %s
+        """,
+        (started, job_id),
     )
     conn.commit()
     try:
-        fn(JobContext(conn, indexes, doc_id))
+        with _traced_reads(context):
+            fn(context)
+        if clock() >= started + timedelta(minutes=30):
+            raise JobError("运行超过 30 分钟")
+        if narrator is not None and context.output_version:
+            try:
+                _fill_description(narrator, context, source_text, loaded_before, lineage)
+            except Exception:
+                pass
     except Exception as exc:
         conn.rollback()
         message = str(exc) or type(exc).__name__
@@ -236,18 +309,36 @@ def run_job(
 
                 saved = save_pending_fix(conn, store, code_id, suggestion, doc_id=doc_id, name=code_id)
                 message += f"\n已生成待确认修改 {saved['version_id']}，没有替换正在使用的版本，也没有再次运行。"
-        _mark_failed(conn, job_id, message)
+        _mark_failed(conn, job_id, message, started=started, clock=clock)
         return get_job(conn, job_id)
+    finished = clock()
     conn.execute(
         """
         UPDATE data_job
-        SET last_status = 'succeeded', last_run_at = %s, last_success_on = %s, last_error = NULL
+        SET last_status = 'succeeded', last_run_at = %s, last_success_on = %s,
+            last_error = NULL, last_duration_seconds = %s
         WHERE job_id = %s
         """,
-        (datetime.now(timezone.utc), current_day, job_id),
+        (finished, current_day, _seconds(started, finished), job_id),
     )
     conn.commit()
     return get_job(conn, job_id)
+
+
+def skill_on_named_job(conn: Connection, question: str) -> str:
+    """问题里只出现一个带技能的任务名时，返回该技能。多个或没有则不附加。"""
+    text = str(question or "")
+    try:
+        jobs = list_jobs(conn)
+    finally:
+        conn.rollback()
+    found: list[str] = []
+    for job in jobs:
+        name = str(job.get("name") or "")
+        skill_id = str(job.get("skill_id") or "")
+        if name and skill_id and name in text and skill_id not in found:
+            found.append(skill_id)
+    return found[0] if len(found) == 1 else ""
 
 
 def run_due(
@@ -257,6 +348,7 @@ def run_due(
     now: datetime,
     store: Any = None,
     fixer: Any = None,
+    narrator: Any = None,
 ) -> list[str]:
     """确认运行时刻后由调用方每分钟触发。本函数本身不挂到进程上。"""
     ran = []
@@ -264,22 +356,182 @@ def run_due(
         if not job["enabled"] or not _is_due(job, now):
             continue
         before = job["last_status"]
-        after = run_job(conn, job["job_id"], codes, indexes, today=now.date(), store=store, fixer=fixer)
+        after = run_job(
+            conn,
+            job["job_id"],
+            codes,
+            indexes,
+            today=now.date(),
+            store=store,
+            fixer=fixer,
+            narrator=narrator,
+        )
         if after["last_status"] != before or after["last_run_at"] != job["last_run_at"]:
             ran.append(job["job_id"])
     return ran
 
 
-def _mark_failed(conn: Connection, job_id: str, message: str) -> None:
+def _reads_as_inputs(conn: Connection, reads: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """只按读到的文件内容对应已发布版本。同名但内容不同不算对应。"""
+    inputs = []
+    unresolved = []
+    seen: set[str] = set()
+    for item in reads:
+        path = str(item.get("path") or "")
+        name = str(item.get("name") or "") or (Path(path).name if path else "")
+        key = path or name
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        digest = _file_checksum(path)
+        matched = _ready_by_checksum(conn, digest) if digest else []
+        if len(matched) != 1:
+            unresolved.append({"source_file": name or "未命名文件"})
+            continue
+        row = matched[0]
+        inputs.append({
+            "doc_id": row["doc_id"],
+            "import_version_id": row["import_version_id"],
+            "data_version_id": row["data_version_id"],
+            "source_file": row["source_file"],
+        })
+    return inputs, unresolved
+
+
+def _file_checksum(path: str) -> str:
+    if not path:
+        return ""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _ready_by_checksum(conn: Connection, digest: str) -> list[Any]:
+    return list(conn.execute(
+        """
+        SELECT doc_id, import_version_id, data_version_id, source_file
+        FROM doc_info
+        WHERE checksum = %s AND status = 'ready' AND COALESCE(data_version_id, '') <> ''
+        """,
+        (digest,),
+    ).fetchall())
+
+
+def _note_read(context: JobContext, target: Any) -> None:
+    if isinstance(target, Path):
+        path = target
+    elif isinstance(target, str):
+        path = Path(target)
+    elif hasattr(target, "name"):
+        path = Path(str(getattr(target, "name")))
+    else:
+        return
+    if path.suffix.lower() not in {".csv", ".tsv", ".xlsx", ".xlsm", ".xls"}:
+        return
+    name = path.name
+    recorded = str(path)
+    if name and all(item.get("path") != recorded for item in context.reads):
+        context.reads.append({"name": name, "path": recorded})
+
+
+@contextmanager
+def _traced_reads(context: JobContext) -> Iterator[None]:
+    """记下这次运行实际打开的表格文件。结束时恢复原来的读取函数。"""
+    try:
+        import pandas as pd
+    except Exception:
+        yield
+        return
+    originals = {}
+
+    def wrap(name: str):
+        original = getattr(pd, name, None)
+        if original is None:
+            return
+
+        def wrapped(*args, **kwargs):
+            if args:
+                _note_read(context, args[0])
+            for key in ("filepath_or_buffer", "io"):
+                if key in kwargs:
+                    _note_read(context, kwargs[key])
+            return original(*args, **kwargs)
+
+        originals[name] = original
+        setattr(pd, name, wrapped)
+
+    for name in ("read_csv", "read_excel", "read_table"):
+        wrap(name)
+    try:
+        yield
+    finally:
+        for name, original in originals.items():
+            setattr(pd, name, original)
+
+
+def _fill_description(narrator, context: JobContext, source_text: str, loaded_before: set[str], lineage: Any) -> None:
+    from structured.lineage import supplement_lineage
+
+    parts = [source_text]
+    root = Path(__file__).resolve().parents[1]
+    for name in set(sys.modules) - loaded_before:
+        module = sys.modules.get(name)
+        file = Path(str(getattr(module, "__file__", "") or ""))
+        if file.suffix != ".py" or root not in file.parents or "site-packages" in file.parts:
+            continue
+        try:
+            parts.append(file.read_text(encoding="utf-8")[:4000])
+        except Exception:
+            continue
+    output = ""
+    try:
+        found = context.conn.execute(
+            "SELECT source_file FROM doc_info WHERE doc_id = %s AND status = 'ready'",
+            (context.doc_id,),
+        ).fetchone()
+        output = found["source_file"] if found else ""
+    except Exception:
+        output = ""
+    try:
+        narration = narrator("\n".join(parts)[:8000], [item["name"] for item in context.reads], output, context.code_id) or {}
+    except Exception:
+        narration = {}
+    if not isinstance(narration, dict):
+        narration = {}
+    supplement_lineage(context.output_version, narration, lineage)
+
+
+def _mark_failed(
+    conn: Connection,
+    job_id: str,
+    message: str,
+    *,
+    started: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> None:
+    finished = clock() if clock is not None else datetime.now(timezone.utc)
     conn.execute(
         """
         UPDATE data_job
-        SET last_status = 'failed', last_run_at = %s, last_error = %s
+        SET last_status = 'failed', last_run_at = %s, last_error = %s, last_duration_seconds = %s
         WHERE job_id = %s
         """,
-        (datetime.now(timezone.utc), message[:1200], job_id),
+        (finished, message[:1200], _seconds(started, finished) if started else None, job_id),
     )
     conn.commit()
+
+
+def _seconds(started: datetime | None, finished: datetime) -> int:
+    if started is None:
+        return 0
+    return max(0, int((finished - started).total_seconds()))
+
+
+def _beijing(now: datetime) -> datetime:
+    if now.tzinfo is None:
+        return now
+    return now.astimezone(ZoneInfo("Asia/Shanghai"))
 
 
 def _existing_docs(conn: Connection, doc_ids: list[str]) -> list[str]:
@@ -328,24 +580,30 @@ def _skill(skill_id: str | None) -> str | None:
     return text
 
 
-def _bound_code(job: dict[str, Any]) -> str:
-    from structured.skills import skill_by_id
+def _ready_version_id(conn: Connection, code_id: str) -> str:
+    if not code_id:
+        return ""
+    row = conn.execute(
+        "SELECT version_id FROM code_version WHERE code_id = %s AND status = 'ready'",
+        (code_id,),
+    ).fetchone()
+    return str(row["version_id"]) if row else ""
 
-    if job.get("code_id"):
-        return str(job["code_id"])
-    skill = skill_by_id(str(job.get("skill_id") or ""))
-    return str((skill or {}).get("code_id") or "")
+
+def _bound_code(job: dict[str, Any]) -> str:
+    return str(job.get("code_id") or "")
 
 
 def _is_due(job: dict[str, Any], now: datetime) -> bool:
-    if job["run_at"] != now.strftime("%H:%M"):
+    local = _beijing(now)
+    if job["run_at"] != local.strftime("%H:%M"):
         return False
     kind = job.get("schedule_kind") or "daily"
     day = job.get("schedule_day")
     if kind == "weekly":
-        return now.isoweekday() == int(day or 0)
+        return local.isoweekday() == int(day or 0)
     if kind == "monthly":
-        return now.day == int(day or 0)
+        return local.day == int(day or 0)
     return True
 
 
@@ -390,5 +648,7 @@ def _public(row: dict[str, Any]) -> dict[str, Any]:
     item["last_success_on"] = success.isoformat() if hasattr(success, "isoformat") else success
     ran = item.get("last_run_at")
     item["last_run_at"] = ran.isoformat() if hasattr(ran, "isoformat") else ran
+    started_at = item.get("run_started_at")
+    item["run_started_at"] = started_at.isoformat() if hasattr(started_at, "isoformat") else started_at
     item["doc_ids"] = list(item.get("doc_ids") or [])
     return item

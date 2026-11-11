@@ -105,6 +105,7 @@ def generate_answer(
     history=None,
     session_memory=None,
     long_term=None,
+    skill: str = "",
 ) -> tuple[str, list[str]]:
     """复用项目的主/备用 OpenAI 兼容接口，让模型从已有图片地址中做选择。"""
     image_urls = _image_urls_from_chunks(chunks)
@@ -150,6 +151,8 @@ def generate_answer(
         "候选图片地址": image_urls,
         **answer_background(history, session_memory, long_term),
     }
+    if str(skill or "").strip():
+        context["技能步骤"] = str(skill).strip()
     files = [name.strip() for name in (related_files or []) if isinstance(name, str) and name.strip()]
     if files:
         context["相关文件"] = list(dict.fromkeys(files))

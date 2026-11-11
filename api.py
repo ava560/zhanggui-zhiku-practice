@@ -8,7 +8,9 @@ import logging
 import os
 import re
 import sys
+import threading
 import uuid
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
 
@@ -35,7 +37,30 @@ from web_server import (
 load_dotenv(PROJECT_ROOT / ".env")
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="掌柜智库", docs_url=None, redoc_url=None)
+
+
+def _job_loop(stop: threading.Event) -> None:
+    while not stop.wait(60):
+        try:
+            from structured.http_api import run_due_jobs
+
+            run_due_jobs()
+        except Exception:
+            logger.exception("定时任务检查失败")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    stop = threading.Event()
+    thread = threading.Thread(target=_job_loop, args=(stop,), name="data-jobs", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+
+
+app = FastAPI(title="掌柜智库", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
 STATIC_FILES = {
     "/styles.css": (WEB_ROOT / "styles.css", "text/css; charset=utf-8"),
@@ -281,9 +306,27 @@ async def send_message(conversation_id: str, request: Request) -> JSONResponse:
         content = payload.get("content")
         if not isinstance(content, str):
             raise ValueError("content 必须是文本")
-        from structured.skills import apply_skill
+        from structured.session import open_db
+        from structured.jobs import skill_on_named_job
+        from structured.skills import bge_skill_score, resolve_turn
 
-        content = apply_skill(payload.get("skill_id"), content)
+        job_skill_id = ""
+        try:
+            conn = open_db()
+            try:
+                job_skill_id = skill_on_named_job(conn, content)
+            finally:
+                conn.close()
+        except Exception:
+            job_skill_id = ""
+        resolved = resolve_turn(
+            content,
+            skill_id=str(payload.get("skill_id") or ""),
+            job_skill_id=job_skill_id,
+            scorer=bge_skill_score,
+        )
+        if resolved["stop"]:
+            raise ValueError(str(resolved["message"]))
         answer = await asyncio.to_thread(
             get_chat_service().send,
             user_id,
@@ -293,6 +336,8 @@ async def send_message(conversation_id: str, request: Request) -> JSONResponse:
             item_name_user_confirmed=payload.get("item_name_user_confirmed"),
             answer_mode=_answer_mode(payload),
             use_web_search=_use_web_search(payload),
+            skill_instructions=str(resolved["instructions"] or ""),
+            skill_id=str(resolved["skill_id"] or ""),
         )
         return _json({"message": answer}, HTTPStatus.CREATED, new_user_id=new_user_id)
     except Exception as exc:
@@ -329,9 +374,29 @@ async def stream_message(conversation_id: str, request: Request) -> Response:
         content = payload.get("content")
         if not isinstance(content, str):
             raise ValueError("content 必须是文本")
-        from structured.skills import apply_skill
+        from structured.session import open_db
+        from structured.jobs import skill_on_named_job
+        from structured.skills import bge_skill_score, resolve_turn
 
-        content = apply_skill(payload.get("skill_id"), content)
+        job_skill_id = ""
+        try:
+            conn = open_db()
+            try:
+                job_skill_id = skill_on_named_job(conn, content)
+            finally:
+                conn.close()
+        except Exception:
+            job_skill_id = ""
+        resolved = resolve_turn(
+            content,
+            skill_id=str(payload.get("skill_id") or ""),
+            job_skill_id=job_skill_id,
+            scorer=bge_skill_score,
+        )
+        if resolved["stop"]:
+            raise ValueError(str(resolved["message"]))
+        skill_instructions = str(resolved["instructions"] or "")
+        skill_id = str(resolved["skill_id"] or "")
         mode = _answer_mode(payload)
         use_web = _use_web_search(payload)
     except Exception as exc:
@@ -356,6 +421,8 @@ async def stream_message(conversation_id: str, request: Request) -> Response:
                 item_name_user_confirmed=payload.get("item_name_user_confirmed"),
                 answer_mode=mode,
                 use_web_search=use_web,
+                skill_instructions=skill_instructions,
+                skill_id=skill_id,
                 on_status=report,
             ):
                 asyncio.run_coroutine_threadsafe(queue.put(event), loop).result()
@@ -407,13 +474,91 @@ def _service_error(exc: Exception) -> JSONResponse:
     from structured.catalog import CatalogError
     from structured.db import DatabaseConfigError
     from structured.jobs import JobError
+    from structured.library import LibraryError
 
-    if isinstance(exc, (CatalogError, JobError, ValueError)):
+    if isinstance(exc, (CatalogError, JobError, LibraryError, ValueError)):
         return _json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
     if isinstance(exc, DatabaseConfigError):
         return _json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
     logger.exception("结构化数据接口失败")
     return _json({"error": "结构化数据查询失败，不能据此判断表里是否有记录。"}, HTTPStatus.BAD_GATEWAY)
+
+
+@app.get("/api/library")
+def library_list(folder_id: str = "") -> JSONResponse:
+    from structured.http_api import library_view
+
+    try:
+        return _json(library_view(folder_id))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/library/folders", status_code=HTTPStatus.CREATED)
+async def library_folder(request: Request) -> JSONResponse:
+    from structured.http_api import library_make_folder
+
+    try:
+        payload = _read_json(await request.body())
+        return _json(library_make_folder(str(payload.get("name") or ""), str(payload.get("parent_id") or "")))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/library/folders/rename")
+async def library_folder_rename(request: Request) -> JSONResponse:
+    from structured.http_api import library_rename_folder
+
+    try:
+        payload = _read_json(await request.body())
+        return _json(library_rename_folder(str(payload.get("folder_id") or ""), str(payload.get("name") or "")))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.get("/api/tables")
+def tables_list() -> JSONResponse:
+    from structured.http_api import data_tables
+
+    try:
+        return _json(data_tables())
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/library/delete")
+async def library_delete(request: Request) -> JSONResponse:
+    from structured.http_api import library_remove_item
+
+    try:
+        payload = _read_json(await request.body())
+        return _json(library_remove_item(str(payload.get("kind") or ""), str(payload.get("id") or "")))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.post("/api/library/move")
+async def library_move(request: Request) -> JSONResponse:
+    from structured.http_api import library_move_item
+
+    try:
+        payload = _read_json(await request.body())
+        return _json(library_move_item(
+            str(payload.get("kind") or ""),
+            str(payload.get("id") or ""),
+            str(payload.get("folder_id") or ""),
+        ))
+    except Exception as exc:
+        return _service_error(exc)
+
+
+@app.get("/api/data-lineage")
+def data_lineage_list() -> JSONResponse:
+    from structured.http_api import lineage_board
+
+    result = lineage_board()
+    status = HTTPStatus.BAD_GATEWAY if result["message"] == "血缘读取失败" else HTTPStatus.OK
+    return _json(result, status)
 
 
 @app.get("/api/table-imports")
@@ -500,6 +645,15 @@ async def patch_data_job(job_id: str, request: Request) -> JSONResponse:
         return _json(jobs_update(job_id, payload))
     except Exception as exc:
         return _service_error(exc)
+
+
+@app.get("/api/data-lineage/{data_version_id}")
+def data_lineage(data_version_id: str) -> JSONResponse:
+    from structured.lineage import lookup_lineage
+
+    result = lookup_lineage(data_version_id)
+    status = HTTPStatus.BAD_GATEWAY if result["message"] == "血缘读取失败" else HTTPStatus.OK
+    return _json(result, status)
 
 
 @app.post("/api/data-jobs/{job_id}/run")

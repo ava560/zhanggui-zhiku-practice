@@ -33,15 +33,19 @@ _PROMPT = """你是查询分流器。只输出一个 JSON 对象，不要输出�
 会话记忆：{session_memory}
 长期记忆：{long_term}
 用户问题：{question}
+{skill}
 """
 
 
-def build_intent_prompt(question: str, history=None, session_memory=None, long_term=None) -> str:
+def build_intent_prompt(question: str, history=None, session_memory=None, long_term=None, skill: str = "") -> str:
+    steps = str(skill or "").strip()
+    skill_text = f"本轮技能步骤：{steps}" if steps else ""
     return _PROMPT.format(
         history=json.dumps(list(history or [])[-10:], ensure_ascii=False),
         session_memory=json.dumps(session_memory or {}, ensure_ascii=False),
         long_term=json.dumps(list(long_term or []), ensure_ascii=False),
         question=question,
+        skill=skill_text,
     )
 
 
@@ -64,9 +68,9 @@ def parse_intent(raw: str) -> str | None:
     return _LABELS.get(label.strip())
 
 
-def classify_intent(question: str, llm, history=None, session_memory=None, long_term=None) -> str:
+def classify_intent(question: str, llm, history=None, session_memory=None, long_term=None, skill: str = "") -> str:
     """调用两次以内。两次都无法解析就失败，不猜测路径。"""
-    prompt = build_intent_prompt(question, history, session_memory, long_term)
+    prompt = build_intent_prompt(question, history, session_memory, long_term, skill)
     for _ in range(2):
         parsed = parse_intent(llm(prompt))
         if parsed:

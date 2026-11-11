@@ -1,10 +1,11 @@
 """聊天记录按浏览器用户和对话编号隔离。"""
 
 import os
+import time
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
-from chat_service import ChatService, model_answer
+from chat_service import AnswerError, ChatService, model_answer
 
 
 class FakeCursor:
@@ -197,6 +198,15 @@ class ChatServiceTests(TestCase):
 
         self.assertNotIn("secret-value-123", reply["content"])
         self.assertEqual(self.service.get("browser-a", conversation["conversation_id"])["messages"][-1]["content"], reply["content"])
+
+    def test_expired_budget_does_not_save_an_answer(self):
+        conversation = self.service.create("browser-a")
+        with patch("chat_service._deadline", return_value=time.monotonic() - 1):
+            with self.assertRaises(AnswerError) as caught:
+                self.service.send("browser-a", conversation["conversation_id"], "这个问题不该有答案")
+        self.assertIn("30 分钟", str(caught.exception))
+        roles = [item["role"] for item in self.service.get("browser-a", conversation["conversation_id"])["messages"]]
+        self.assertEqual(roles, ["user"])
 
 
 class ModelAnswerTests(TestCase):

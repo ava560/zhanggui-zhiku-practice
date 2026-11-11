@@ -141,13 +141,103 @@ def delete_skill(conn: Connection, skill_id: str) -> None:
     conn.commit()
 
 
-def apply_skill(skill_id: str, content: str) -> str:
-    skill = skill_by_id(skill_id)
-    if skill is None:
-        if str(skill_id or "").strip():
-            raise ValueError("技能不存在")
-        return content
-    return f"{skill['instructions']}\n\n用户问题：{content}"
+def apply_skill(skill_id: str, content: str) -> dict[str, str | bool]:
+    """技能步骤与用户原话分开返回，不把做法拼进问题。"""
+    return resolve_turn(content, skill_id=skill_id)
+
+
+def resolve_turn(
+    question: str,
+    skill_id: str = "",
+    job_skill_id: str = "",
+    scorer=None,
+) -> dict[str, str | bool]:
+    """按 @、请求编号、任务绑定或相似度决定本轮技能。原问题保持不动。"""
+    text = str(question or "")
+    skills = list_skills()
+    picked = _mentions(text, skills)
+    if picked["missing"]:
+        return _stopped(text, "未找到这个技能，本轮不继续检索。")
+    if picked["ambiguous"] or len(picked["skills"]) > 1:
+        return _stopped(text, "点名了多个技能，请先选择一个。")
+    named = picked["skills"][0] if picked["skills"] else None
+    requested = _requested(skill_id)
+    if named and requested and named["skill_id"] != requested["skill_id"]:
+        return _stopped(text, "点名了多个技能，请先选择一个。")
+    chosen = named or requested
+    if chosen is None and str(job_skill_id or "").strip():
+        chosen = skill_by_id(job_skill_id)
+    if chosen is None and scorer is not None:
+        chosen = _by_score(text, skills, scorer)
+        if chosen == "choose":
+            return _stopped(text, "有多个相近技能，请先选择一个。")
+    if chosen is None:
+        return _open(text, "", "")
+    return _open(text, chosen["skill_id"], chosen["instructions"])
+
+
+def _requested(skill_id: str) -> dict[str, str] | None:
+    text = str(skill_id or "").strip()
+    if not text:
+        return None
+    found = skill_by_id(text)
+    if found is None:
+        raise ValueError("技能不存在")
+    return found
+
+
+def _mentions(text: str, skills: list[dict[str, str]]) -> dict[str, object]:
+    names = sorted({item["name"] for item in skills}, key=len, reverse=True)
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for item in skills:
+        grouped.setdefault(item["name"], []).append(item)
+    found: list[dict[str, str]] = []
+    index = 0
+    while index < len(text):
+        if text[index] not in "@＠":
+            index += 1
+            continue
+        rest = text[index + 1 :]
+        match = next((name for name in names if rest.startswith(name)), "")
+        if not match:
+            return {"missing": True, "ambiguous": False, "skills": []}
+        group = grouped[match]
+        if len(group) != 1:
+            return {"missing": False, "ambiguous": True, "skills": []}
+        found.append(group[0])
+        index += 1 + len(match)
+    return {"missing": False, "ambiguous": False, "skills": found}
+
+
+def _by_score(question: str, skills: list[dict[str, str]], scorer):
+    scored = []
+    for item in skills:
+        try:
+            score = float(scorer(question, item))
+        except (TypeError, ValueError):
+            continue
+        if score >= 0.6:
+            scored.append((score, item))
+    high = [item for score, item in scored if score >= 0.9]
+    if len(high) == 1:
+        return high[0]
+    if scored:
+        return "choose"
+    return None
+
+
+def _open(question: str, skill_id: str, instructions: str) -> dict[str, str | bool]:
+    return {
+        "question": question,
+        "skill_id": skill_id,
+        "instructions": instructions,
+        "stop": False,
+        "message": "",
+    }
+
+
+def _stopped(question: str, message: str) -> dict[str, str | bool]:
+    return {"question": question, "skill_id": "", "instructions": "", "stop": True, "message": message}
 
 
 def _ensure(conn: Connection) -> None:
@@ -163,6 +253,21 @@ def _limited(value: str, limit: int, empty_message: str) -> str:
     if len(text) > limit:
         raise SkillError(f"不能超过 {limit} 字")
     return text
+
+
+def bge_skill_score(question: str, skill: dict[str, Any]) -> float:
+    """用已有 BGE-M3 比较问题和技能名称、何时使用。模型不可用时记 0，不套用。"""
+    left = str(question or "").strip()
+    right = f"{skill.get('name') or ''}\n{skill.get('summary') or ''}".strip()
+    if not left or not right:
+        return 0.0
+    try:
+        from upload.node_bge_embedding import encode_batch, get_bge_model, load_settings
+
+        vectors, _sparse = encode_batch(get_bge_model(load_settings()), [left, right])
+        return float(sum(a * b for a, b in zip(vectors[0], vectors[1])))
+    except Exception:
+        return 0.0
 
 
 def _code_id(value: Any) -> str:

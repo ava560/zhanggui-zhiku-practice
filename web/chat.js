@@ -8,6 +8,30 @@ const state = {
   loadToken: 0,
   skillId: "",
   editingSkillId: "",
+  libraryFolder: "",
+  jobFiles: [],
+  jobCode: { id: "", name: "" },
+  skillCode: { id: "", name: "" },
+  pickerMode: "",
+  pickerTarget: "job",
+  pickerFolder: "",
+  pickerFiles: [],
+  pickerCode: { id: "", name: "" },
+  pickerItems: [],
+  pickerShown: [],
+  pickerAnchor: -1,
+  pickerCrumbs: [],
+  moveItems: [],
+  libraryItems: [],
+  libraryShown: [],
+  libraryCrumbs: [],
+  libraryTrail: [""],
+  libraryTrailIndex: 0,
+  librarySelection: [],
+  libraryAnchor: -1,
+  librarySort: { key: "name", dir: 1 },
+  clipboard: [],
+  editing: null,
 };
 
 const ui = {
@@ -132,6 +156,12 @@ function renderMessages() {
     }
     const content = document.createElement("div");
     content.className = "message-content";
+    if (message.running) {
+      const clock = document.createElement("p");
+      clock.className = "run-clock";
+      clock.textContent = message.elapsedText || "已运行 0秒";
+      content.append(clock);
+    }
     if (message.pending) renderProgress(content, message);
     else renderAnswer(content, message.content, message.role);
     body.append(content);
@@ -445,12 +475,21 @@ async function submitMessage(question, extra = {}) {
   state.sending = true;
   updateComposer();
   let id = state.activeId;
+  let timer = 0;
   try {
     if (!id) id = await createConversation();
     state.sendingId = id;
     state.loadToken += 1;
     ui.input.value = "";
     updateComposer();
+    const startedAt = Date.now();
+    timer = window.setInterval(() => {
+      const draft = state.messages.at(-1);
+      if (!draft || draft.role !== "assistant" || !draft.running) return;
+      draft.elapsedText = `已运行 ${formatDuration(Math.floor((Date.now() - startedAt) / 1000))}`;
+      const clock = ui.messages.querySelector(".run-clock");
+      if (clock) clock.textContent = draft.elapsedText;
+    }, 1000);
     state.messages.push({ role: "user", content: question });
     state.messages.push({
       role: "assistant",
@@ -458,6 +497,8 @@ async function submitMessage(question, extra = {}) {
       statusText: "已收到问题，正在判断需要哪类资料。",
       steps: ["已收到问题，正在判断需要哪类资料。"],
       pending: true,
+      running: true,
+      elapsedText: "已运行 0秒",
       citations: [],
     });
     state.pendingConfirmation = null;
@@ -495,6 +536,9 @@ async function submitMessage(question, extra = {}) {
     showError(error.message);
     if (id && state.activeId === id) await loadConversation(id);
   } finally {
+    window.clearInterval(timer);
+    const draft = state.messages.at(-1);
+    if (draft && draft.role === "assistant") draft.running = false;
     state.sending = false;
     state.sendingId = null;
     updateComposer();
@@ -555,6 +599,8 @@ function showDesk(which) {
     jobs: ["定时任务", "小灵 / 定时任务"],
     skills: ["技能", "小灵 / 技能"],
     memory: ["个性化", "小灵 / 个性化"],
+    lineage: ["数据血缘", "小灵 / 数据血缘"],
+    tables: ["数据表", "小灵 / 数据表"],
     database: ["数据库", "小灵 / 数据库"],
   };
   for (const name of Object.keys(desks)) {
@@ -565,15 +611,19 @@ function showDesk(which) {
   document.querySelector(".composer-wrap").hidden = open;
   document.querySelector("#openJobs").classList.toggle("is-active", which === "jobs");
   document.querySelector("#openSkills").classList.toggle("is-active", which === "skills");
+  document.querySelector("#openLineage").classList.toggle("is-active", which === "lineage");
   document.querySelector("#newChat").classList.toggle("is-active", !open);
   document.querySelector("#userMenu").hidden = true;
   document.querySelector("#openUserMenu").setAttribute("aria-expanded", "false");
+  document.querySelector("#closeDesk").hidden = !open;
   if (open) {
     ui.title.textContent = desks[which][0];
     document.querySelector(".current-chat-label").textContent = desks[which][1];
     if (which === "jobs") loadJobs().catch((error) => showError(error.message));
     if (which === "skills") renderSkills();
     if (which === "memory") loadMemory().catch((error) => showError(error.message));
+    if (which === "lineage") loadLineage().catch((error) => showError(error.message));
+    if (which === "tables") loadTables().catch((error) => showError(error.message));
     if (which === "database") loadDatabase().catch((error) => showError(error.message));
   } else {
     document.querySelector(".current-chat-label").textContent = "小灵 / 金融知识";
@@ -597,7 +647,7 @@ document.querySelector("#openJobDialog").addEventListener("click", () => {
 document.querySelector("#cancelJob").addEventListener("click", () => document.querySelector("#jobDialog").close());
 document.querySelector("#jobForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const docIds = [...document.querySelectorAll("#jobDocs input:checked")].map((item) => item.value);
+  const docIds = state.jobFiles.map((item) => item.id);
   try {
     await api("/api/data-jobs", {
       method: "POST",
@@ -605,7 +655,7 @@ document.querySelector("#jobForm").addEventListener("submit", async (event) => {
         name: document.querySelector("#jobName").value.trim(),
         sop_ref: document.querySelector("#jobSop").value.trim(),
         description: document.querySelector("#jobDescription").value.trim(),
-        code_id: document.querySelector("#jobCode").value,
+        code_id: state.jobCode.id,
         skill_id: document.querySelector("#jobSkill").value,
         run_at: document.querySelector("#jobRunAt").value.trim(),
         schedule_kind: document.querySelector("#jobCadence").value,
@@ -622,34 +672,10 @@ document.querySelector("#jobForm").addEventListener("submit", async (event) => {
 });
 
 function fillJobDialog() {
-  const docs = document.querySelector("#jobDocs");
-  docs.replaceChildren();
-  if (!jobCatalog.documents.length) {
-    docs.textContent = "还没有已登记的文件。";
-  }
-  for (const doc of jobCatalog.documents) {
-    const label = document.createElement("label");
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.value = doc.doc_id;
-    const text = document.createElement("span");
-    text.textContent = `${doc.source_file} · ${doc.status}`;
-    label.append(input, text);
-    docs.append(label);
-  }
+  state.jobFiles = [];
+  state.jobCode = { id: "", name: "" };
+  renderJobPicks();
   fillDayOptions();
-  const code = document.querySelector("#jobCode");
-  code.replaceChildren();
-  const empty = document.createElement("option");
-  empty.value = "";
-  empty.textContent = "不指定，不会运行";
-  code.append(empty);
-  for (const item of jobCatalog.codes) {
-    const option = document.createElement("option");
-    option.value = item.code_id;
-    option.textContent = item.name || item.code_id;
-    code.append(option);
-  }
   const skill = document.querySelector("#jobSkill");
   skill.replaceChildren();
   const noSkill = document.createElement("option");
@@ -689,6 +715,23 @@ function fillDayOptions() {
   }
 }
 
+function jobElapsed(job) {
+  if (job.last_status === "running" && job.run_started_at) {
+    const started = Date.parse(job.run_started_at);
+    if (Number.isFinite(started)) return formatDuration(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+  }
+  return formatDuration(job.last_duration_seconds);
+}
+
+function formatDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return "";
+  const whole = Math.floor(value);
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  return minutes ? `${minutes}分${rest}秒` : `${rest}秒`;
+}
+
 function scheduleText(job) {
   if (job.schedule_kind === "weekly") {
     const names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -697,6 +740,8 @@ function scheduleText(job) {
   if (job.schedule_kind === "monthly") return `每月${job.schedule_day}日 ${job.run_at}`;
   return `每天 ${job.run_at}`;
 }
+
+let jobTimer = 0;
 
 async function loadJobs() {
   jobCatalog = { ...jobCatalog, ...(await api("/api/data-jobs")) };
@@ -707,6 +752,7 @@ async function loadJobs() {
   detail.hidden = !opened;
   if (opened) {
     await renderJobDetail(opened.job_id);
+    watchRunningJobs(jobCatalog.jobs);
     return;
   }
   list.replaceChildren();
@@ -715,6 +761,7 @@ async function loadJobs() {
     empty.className = "empty-note";
     empty.textContent = "还没有定时任务。";
     list.append(empty);
+    watchRunningJobs(jobCatalog.jobs);
     return;
   }
   for (const job of jobCatalog.jobs) {
@@ -728,7 +775,8 @@ async function loadJobs() {
     title.append(pill);
     const meta = document.createElement("p");
     meta.className = "job-meta";
-    meta.textContent = `${job.sop_ref} · ${scheduleText(job)} · 代码 ${job.code_id || "未指定"}`;
+    const elapsed = jobElapsed(job);
+    meta.textContent = `${job.sop_ref} · ${scheduleText(job)} · 代码 ${job.code_id || "未指定"}${elapsed ? ` · 已运行 ${elapsed}` : ""}`;
     const actions = document.createElement("div");
     actions.className = "chip-row";
     const open = document.createElement("button");
@@ -758,6 +806,17 @@ async function loadJobs() {
     }
     list.append(card);
   }
+  watchRunningJobs(jobCatalog.jobs);
+}
+
+function watchRunningJobs(jobs) {
+  window.clearInterval(jobTimer);
+  jobTimer = 0;
+  if ((jobs || []).some((job) => job.last_status === "running")) {
+    jobTimer = window.setInterval(() => {
+      loadJobs().catch((error) => showError(error.message));
+    }, 5000);
+  }
 }
 
 async function renderJobDetail(jobId) {
@@ -781,6 +840,13 @@ async function renderJobDetail(jobId) {
   pill.className = "status-pill";
   pill.textContent = jobStatus[job.last_status] || job.last_status;
   heading.append(title, pill);
+  const elapsed = jobElapsed(job);
+  if (elapsed) {
+    const timing = document.createElement("p");
+    timing.className = "job-meta";
+    timing.textContent = `已运行 ${elapsed}`;
+    heading.append(timing);
+  }
   const grid = document.createElement("div");
   grid.className = "detail-grid";
   const description = document.createElement("label");
@@ -956,6 +1022,7 @@ function renderFilePreview(file) {
 }
 
 document.querySelector("#brandHome").addEventListener("click", () => showDesk(""));
+document.querySelector("#closeDesk").addEventListener("click", () => showDesk(""));
 document.querySelector("#openUserMenu").addEventListener("click", () => {
   const menu = document.querySelector("#userMenu");
   menu.hidden = !menu.hidden;
@@ -963,7 +1030,9 @@ document.querySelector("#openUserMenu").addEventListener("click", () => {
 });
 document.querySelectorAll("#userMenu [data-view]").forEach((button) => {
   button.addEventListener("click", () => {
-    showDesk(button.dataset.view);
+    const view = button.dataset.view;
+    const panel = document.querySelector(`#${view}View`);
+    showDesk(panel && !panel.hidden ? "" : view);
     setSidebar(false);
   });
 });
@@ -1019,7 +1088,7 @@ document.querySelector("#skillForm").addEventListener("submit", async (event) =>
     name: document.querySelector("#skillName").value.trim(),
     summary: document.querySelector("#skillSummary").value.trim(),
     instructions: document.querySelector("#skillInstructions").value.trim(),
-    code_id: document.querySelector("#skillCode").value,
+    code_id: state.skillCode.id,
   };
   try {
     const path = state.editingSkillId ? `/api/skills/${state.editingSkillId}` : "/api/skills";
@@ -1046,24 +1115,8 @@ async function openSkillDialog(skill) {
   document.querySelector("#skillName").value = skill?.name || "";
   document.querySelector("#skillSummary").value = skill?.summary || "";
   document.querySelector("#skillInstructions").value = skill?.instructions || "";
-  const select = document.querySelector("#skillCode");
-  select.replaceChildren();
-  const none = document.createElement("option");
-  none.value = "";
-  none.textContent = "不绑定代码";
-  select.append(none);
-  try {
-    const data = await api("/api/data-jobs");
-    for (const item of data.codes || []) {
-      const option = document.createElement("option");
-      option.value = item.code_id;
-      option.textContent = item.name || item.code_id;
-      option.selected = item.code_id === skill?.code_id;
-      select.append(option);
-    }
-  } catch (error) {
-    showError(error.message);
-  }
+  state.skillCode = { id: skill?.code_id || "", name: skill?.code_id || "" };
+  renderSkillCode();
   document.querySelector("#skillDialog").showModal();
 }
 
@@ -1114,27 +1167,925 @@ function renderSkills() {
   }).catch((error) => showError(error.message));
 }
 
-async function loadDatabase() {
-  const data = await api("/api/table-imports");
-  const list = document.querySelector("#databaseList");
+document.querySelector("#openLineage").addEventListener("click", () => {
+  const opening = document.querySelector("#lineageView").hidden;
+  showDesk(opening ? "lineage" : "");
+  if (opening) setSidebar(false);
+});
+document.querySelector("#newFolder").addEventListener("click", () => beginNewFolder());
+document.querySelector("#libraryBack").addEventListener("click", () => libraryHistory(-1));
+document.querySelector("#libraryForward").addEventListener("click", () => libraryHistory(1));
+document.querySelector("#libraryUp").addEventListener("click", () => libraryUp());
+document.querySelector("#libraryCut").addEventListener("click", () => cutSelection());
+document.querySelector("#libraryPaste").addEventListener("click", () => pasteItems(state.libraryFolder));
+document.querySelector("#libraryRename").addEventListener("click", () => beginRename(selectedLibraryItems()[0]));
+document.querySelector("#libraryMove").addEventListener("click", () => moveLibraryItems(selectedLibraryItems()));
+document.querySelector("#libraryDelete").addEventListener("click", () => deleteLibraryItems(selectedLibraryItems()));
+document.querySelector("#pickerUp").addEventListener("click", () => {
+  const crumbs = state.pickerCrumbs || [];
+  if (crumbs.length > 1) loadPicker(crumbs[crumbs.length - 2].id).catch((error) => showError(error.message));
+});
+document.querySelectorAll("[data-sort]").forEach((button) => {
+  button.addEventListener("click", () => setLibrarySort(button.dataset.sort));
+});
+document.querySelector("#explorerFrame").addEventListener("keydown", onExplorerKey);
+document.querySelector("#databaseList").addEventListener("contextmenu", (event) => {
+  if (event.target !== event.currentTarget) return;
+  event.preventDefault();
+  state.librarySelection = [];
+  markLibrarySelection();
+  openLibraryMenu(event.clientX, event.clientY, null);
+});
+document.querySelector("#databaseList").addEventListener("click", (event) => {
+  if (event.target !== event.currentTarget) return;
+  state.librarySelection = [];
+  markLibrarySelection();
+});
+document.addEventListener("click", (event) => {
+  if (Date.now() - (state.menuOpenedAt || 0) < 250) return;
+  if (!event.target.closest("#libraryMenu")) closeLibraryMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeLibraryMenu();
+});
+window.addEventListener("resize", closeLibraryMenu);
+document.querySelector("#pickJobFiles").addEventListener("click", () => openLibraryPicker("files"));
+document.querySelector("#pickJobCode").addEventListener("click", () => openLibraryPicker("code", "job"));
+document.querySelector("#pickSkillCode").addEventListener("click", () => openLibraryPicker("code", "skill"));
+document.querySelector("#cancelPicker").addEventListener("click", () => document.querySelector("#libraryPicker").close());
+document.querySelector("#libraryPickerForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  applyLibraryPicker();
+  document.querySelector("#libraryPicker").close();
+});
+
+function renderJobPicks() {
+  const files = state.jobFiles.map((item) => item.name).join("、");
+  document.querySelector("#jobFileNames").textContent = files || "还没有选择文件";
+  document.querySelector("#jobCodeName").textContent = state.jobCode.name || "不指定，不会运行";
+}
+
+function renderSkillCode() {
+  document.querySelector("#skillCodeName").textContent = state.skillCode.name || "不绑定代码";
+}
+
+async function loadLineage() {
+  const data = await api("/api/data-lineage");
+  const list = document.querySelector("#lineageList");
+  const detail = document.querySelector("#lineageDetail");
+  detail.hidden = true;
   list.replaceChildren();
-  const tables = (data.tables || []).filter((item) => item.table_name);
+  if (data.message) {
+    const note = document.createElement("p");
+    note.className = "empty-note";
+    note.textContent = data.message;
+    list.append(note);
+    return;
+  }
+  const records = data.records || [];
+  if (!records.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = "还没有血缘记录。";
+    list.append(empty);
+    return;
+  }
+  for (const record of records) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "plain-card";
+    const title = document.createElement("strong");
+    title.textContent = record.title || "文件已不在";
+    const meta = document.createElement("small");
+    meta.textContent = record.subtitle || "";
+    card.append(title, meta);
+    card.addEventListener("click", () => renderLineage(record));
+    list.append(card);
+  }
+}
+
+function renderLineage(record) {
+  const detail = document.querySelector("#lineageDetail");
+  detail.hidden = false;
+  detail.replaceChildren();
+  const title = document.createElement("h2");
+  title.textContent = record.title || "文件已不在";
+  const meta = document.createElement("p");
+  meta.className = "job-meta";
+  meta.textContent = record.subtitle || "";
+  detail.append(title, meta);
+  detail.append(lineageBlock("输入文件", record.inputs, "这次没有读到文件"));
+  detail.append(lineageBlock("涉及的代码", [record.code_name || "没有登记代码"], "没有登记代码"));
+  const actions = (record.steps || []).map((step) => `${step.order}. ${step.action}`);
+  detail.append(lineageBlock("加工步骤", actions, "加工步骤尚未生成"));
+  const description = document.createElement("p");
+  description.className = "job-meta";
+  description.textContent = record.description || "加工描述尚未生成";
+  const heading = document.createElement("h3");
+  heading.textContent = "描述";
+  detail.append(heading, description);
+}
+
+function lineageBlock(heading, items, empty) {
+  const block = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = heading;
+  const list = document.createElement("ul");
+  const values = items && items.length ? items : [empty];
+  for (const item of values) {
+    const row = document.createElement("li");
+    row.textContent = item;
+    list.append(row);
+  }
+  block.append(title, list);
+  return block;
+}
+
+function previewTable(columns, rows) {
+  const wrap = document.createElement("div");
+  wrap.className = "preview";
+  const grid = document.createElement("table");
+  const keys = columns && columns.length ? columns : Object.keys(rows[0] || {});
+  const head = document.createElement("tr");
+  for (const key of keys) {
+    const cell = document.createElement("th");
+    cell.textContent = key;
+    head.append(cell);
+  }
+  grid.append(head);
+  for (const record of rows) {
+    const line = document.createElement("tr");
+    for (const key of keys) {
+      const cell = document.createElement("td");
+      cell.textContent = record[key] ?? "";
+      line.append(cell);
+    }
+    grid.append(line);
+  }
+  wrap.append(grid);
+  return wrap;
+}
+
+async function loadTables() {
+  const data = await api("/api/tables");
+  const list = document.querySelector("#tableList");
+  const detail = document.querySelector("#tableDetail");
+  detail.hidden = true;
+  list.replaceChildren();
+  const tables = data.tables || [];
+  const metadata = tables.filter((table) => table.kind === "metadata");
+  const business = tables.filter((table) => table.kind !== "metadata");
   if (!tables.length) {
     const empty = document.createElement("p");
     empty.className = "empty-note";
-    empty.textContent = "还没有已发布的表。";
+    empty.textContent = "还没有已确认的数据表。";
+    list.append(empty);
+    return;
+  }
+  appendTableGroup(list, "元数据表", metadata);
+  appendTableGroup(list, "业务表", business);
+}
+
+function appendTableGroup(list, label, tables) {
+  const heading = document.createElement("h2");
+  heading.className = "table-group";
+  heading.textContent = label;
+  list.append(heading);
+  if (!tables.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = "还没有已确认的业务表。";
     list.append(empty);
     return;
   }
   for (const table of tables) {
-    const card = document.createElement("article");
-    card.className = "plain-card static";
-    const name = document.createElement("strong");
-    name.textContent = table.source_file;
-    const summary = document.createElement("small");
-    summary.textContent = table.table_summary || "已发布";
-    card.append(name, summary);
-    list.append(card);
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "plain-card";
+    const title = document.createElement("strong");
+    title.textContent = table.kind === "metadata" ? table.table_name : table.source_file;
+    const meta = document.createElement("small");
+    const detail = table.kind === "metadata" ? table.summary : (table.summary || "业务表");
+    meta.textContent = `${detail} · ${table.row_count} 行 · ${table.columns.length} 个字段`;
+    card.append(title, meta);
+    card.addEventListener("click", () => renderTable(table));
+    if (table.kind === "metadata") {
+      list.append(card);
+      return;
+    }
+    const row = document.createElement("div");
+    row.className = "table-row";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "desk-ghost";
+    remove.textContent = "删除";
+    remove.addEventListener("click", async () => {
+      await deleteLibraryItems([{ kind: "file", id: table.doc_id, name: table.source_file }]);
+      if (!document.querySelector("#tablesView").hidden) await loadTables();
+    });
+    row.append(card, remove);
+    list.append(row);
+  }
+}
+
+function renderTable(table) {
+  const detail = document.querySelector("#tableDetail");
+  detail.hidden = false;
+  detail.replaceChildren();
+  const title = document.createElement("h2");
+  title.textContent = table.kind === "metadata" ? table.table_name : table.source_file;
+  const meta = document.createElement("p");
+  meta.className = "job-meta";
+  meta.textContent = table.kind === "metadata"
+    ? `${table.role} · ${table.row_count} 行`
+    : `${table.role || "数据表"} · ${table.row_count} 行 · ${table.table_name}`;
+  if (table.summary) {
+    const summary = document.createElement("p");
+    summary.className = "job-meta";
+    summary.textContent = table.summary;
+    detail.append(title, meta, summary);
+  } else {
+    detail.append(title, meta);
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "preview";
+  const grid = document.createElement("table");
+  const head = document.createElement("tr");
+  for (const label of ["字段", "类型", "说明"]) {
+    const cell = document.createElement("th");
+    cell.textContent = label;
+    head.append(cell);
+  }
+  grid.append(head);
+  for (const column of table.columns || []) {
+    const line = document.createElement("tr");
+    for (const value of [column.label || column.name, column.type, column.description]) {
+      const cell = document.createElement("td");
+      cell.textContent = value || "";
+      line.append(cell);
+    }
+    grid.append(line);
+  }
+  wrap.append(grid);
+  detail.append(wrap);
+  if ((table.rows || []).length) {
+    const caption = document.createElement("h3");
+    caption.textContent = "最近记录";
+    const rows = document.createElement("div");
+    rows.className = "preview";
+    const sample = document.createElement("table");
+    const sampleHead = document.createElement("tr");
+    const keys = Object.keys(table.rows[0]);
+    for (const key of keys) {
+      const cell = document.createElement("th");
+      cell.textContent = key;
+      sampleHead.append(cell);
+    }
+    sample.append(sampleHead);
+    for (const record of table.rows) {
+      const line = document.createElement("tr");
+      for (const key of keys) {
+        const cell = document.createElement("td");
+        cell.textContent = record[key] ?? "";
+        line.append(cell);
+      }
+      sample.append(line);
+    }
+    rows.append(sample);
+    detail.append(caption, rows);
+  }
+}
+
+async function deleteLibraryItems(items) {
+  if (!items.length) return;
+  const count = items.length === 1 ? `「${items[0].name}」` : `${items.length} 个项目`;
+  const agreed = window.confirm(`删除${count}？上传目录里的同名原件、MinIO 原件和 Milvus 向量会一起去掉。`);
+  if (!agreed) return;
+  try {
+    for (const item of items) {
+      await api("/api/library/delete", {
+        method: "POST",
+        body: JSON.stringify({ kind: item.kind, id: item.id }),
+      });
+    }
+    state.clipboard = state.clipboard.filter((item) => !items.some((chosen) => chosen.kind === item.kind && chosen.id === item.id));
+    state.librarySelection = [];
+    await loadDatabase(state.libraryFolder, { record: false });
+  } catch (error) {
+    showError(error.message);
+    const status = document.querySelector("#libraryStatus");
+    if (status) status.textContent = error.message;
+    await loadDatabase(state.libraryFolder, { record: false });
+  }
+}
+
+async function loadDatabase(folderId = state.libraryFolder, options = {}) {
+  const next = folderId || "";
+  if (next !== state.libraryFolder) {
+    state.librarySelection = [];
+    state.libraryAnchor = -1;
+  }
+  if (options.record !== false && next !== state.libraryFolder) {
+    state.libraryTrail = state.libraryTrail.slice(0, state.libraryTrailIndex + 1);
+    state.libraryTrail.push(next);
+    state.libraryTrailIndex = state.libraryTrail.length - 1;
+  }
+  state.libraryFolder = next;
+  const data = await api(`/api/library?folder_id=${encodeURIComponent(state.libraryFolder)}`);
+  state.libraryCrumbs = data.breadcrumb || [];
+  state.libraryItems = data.items || [];
+  renderAddress(document.querySelector("#libraryCrumbs"), state.libraryCrumbs, (id) => {
+    loadDatabase(id).catch((error) => showError(error.message));
+  });
+  paintLibrary();
+}
+
+function libraryHistory(step) {
+  const next = state.libraryTrailIndex + step;
+  if (next < 0 || next >= state.libraryTrail.length) return;
+  state.libraryTrailIndex = next;
+  state.librarySelection = [];
+  loadDatabase(state.libraryTrail[next], { record: false }).catch((error) => showError(error.message));
+}
+
+function libraryUp() {
+  const crumbs = state.libraryCrumbs || [];
+  if (crumbs.length < 2) return;
+  state.librarySelection = [];
+  loadDatabase(crumbs[crumbs.length - 2].id).catch((error) => showError(error.message));
+}
+
+function renderAddress(host, crumbs, onOpen) {
+  host.replaceChildren();
+  crumbs.forEach((crumb, index) => {
+    if (index) {
+      const sep = document.createElement("span");
+      sep.className = "explorer-sep";
+      sep.textContent = "›";
+      host.append(sep);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = crumb.name;
+    if (index === crumbs.length - 1) button.classList.add("current");
+    button.addEventListener("click", () => onOpen(crumb.id));
+    host.append(button);
+  });
+}
+
+function itemKey(item) {
+  return `${item.kind}:${item.id}`;
+}
+
+function sortedLibraryItems(items) {
+  const { key, dir } = state.librarySort;
+  return [...items].sort((a, b) => {
+    if (a.kind === "folder" && b.kind !== "folder") return -1;
+    if (b.kind === "folder" && a.kind !== "folder") return 1;
+    const left = key === "modified" ? a.modified || "" : a[key] || a.name || "";
+    const right = key === "modified" ? b.modified || "" : b[key] || b.name || "";
+    return String(left).localeCompare(String(right), "zh") * dir;
+  });
+}
+
+function setLibrarySort(key) {
+  if (state.librarySort.key === key) state.librarySort.dir *= -1;
+  else state.librarySort = { key, dir: 1 };
+  paintLibrary();
+  if (document.querySelector("#libraryPicker").open) paintPicker();
+}
+
+function paintSortMarks() {
+  document.querySelectorAll("[data-sort]").forEach((button) => {
+    const active = button.dataset.sort === state.librarySort.key;
+    button.classList.toggle("sorted", active);
+    button.dataset.dir = active && state.librarySort.dir < 0 ? "desc" : "asc";
+  });
+}
+
+function formatModified(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function explorerIcon(item) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("class", "explorer-ico");
+  svg.setAttribute("aria-hidden", "true");
+  if (item.kind === "folder") {
+    svg.innerHTML = '<path fill="#f8d775" stroke="#c48a12" d="M1.5 3.8h4.2l1.2 1.4h7.6v8.2h-13z"/><path fill="#ffe7a3" d="M1.5 6.2h13v7.2h-13z"/>';
+  } else {
+    const color = item.kind === "code" ? "#3d4a5c" : item.type?.includes("PDF") ? "#d24b40" : item.type?.includes("Word") ? "#2b579a" : item.type?.includes("Excel") || item.type?.includes("CSV") ? "#217346" : "#6e6e80";
+    svg.innerHTML = `<path fill="${color}" d="M3.5 1.2h5.2L12.5 5v9.8h-9z"/><path fill="#fff" d="M8.7 1.2V5h3.8" opacity=".9"/>`;
+  }
+  return svg;
+}
+
+function paintLibrary() {
+  state.libraryShown = sortedLibraryItems(state.libraryItems);
+  const list = document.querySelector("#databaseList");
+  list.replaceChildren();
+  if (state.editing?.mode === "create") list.append(editRow("新建文件夹"));
+  if (!state.libraryShown.length && state.editing?.mode !== "create") {
+    const empty = document.createElement("p");
+    empty.className = "explorer-empty";
+    empty.textContent = "此文件夹为空";
+    list.append(empty);
+  }
+  state.libraryShown.forEach((item, index) => list.append(libraryRow(item, index)));
+  paintSortMarks();
+  updateExplorerCommands();
+  const status = document.querySelector("#libraryStatus");
+  const selected = state.librarySelection.length;
+  status.textContent = selected ? `已选择 ${selected} 个项目，共 ${state.libraryShown.length} 个项目` : `${state.libraryShown.length} 个项目`;
+  document.querySelector("#libraryBack").disabled = state.libraryTrailIndex <= 0;
+  document.querySelector("#libraryForward").disabled = state.libraryTrailIndex >= state.libraryTrail.length - 1;
+  document.querySelector("#libraryUp").disabled = (state.libraryCrumbs || []).length < 2;
+}
+
+function libraryRow(item, index) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "explorer-row";
+  row.role = "option";
+  row.dataset.key = itemKey(item);
+  row.draggable = state.editing?.key !== itemKey(item);
+  const name = document.createElement("span");
+  name.className = "explorer-name";
+  name.append(explorerIcon(item));
+  if (state.editing?.mode === "rename" && state.editing.key === itemKey(item)) {
+    name.append(nameInput(item.name, (value) => commitRename(item, value)));
+  } else {
+    const text = document.createElement("span");
+    text.className = "name-text";
+    text.textContent = item.name;
+    name.append(text);
+  }
+  const date = document.createElement("span");
+  date.className = "explorer-date";
+  date.textContent = formatModified(item.modified);
+  const type = document.createElement("span");
+  type.className = "explorer-type";
+  type.textContent = item.type || item.detail || "";
+  const detail = document.createElement("span");
+  detail.className = "explorer-detail";
+  detail.textContent = item.detail || "";
+  row.append(name, date, type, detail);
+  row.addEventListener("click", (event) => {
+    document.querySelector("#explorerFrame").focus();
+    selectLibraryRow(item, index, event);
+  });
+  row.addEventListener("dblclick", () => {
+    if (item.kind === "folder") loadDatabase(item.id).catch((error) => showError(error.message));
+  });
+  row.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!state.librarySelection.includes(itemKey(item))) {
+      state.librarySelection = [itemKey(item)];
+      state.libraryAnchor = index;
+    }
+    markLibrarySelection();
+    openLibraryMenu(event.clientX, event.clientY, item);
+  });
+  row.addEventListener("dragstart", (event) => {
+    if (!state.librarySelection.includes(itemKey(item))) {
+      state.librarySelection = [itemKey(item)];
+      state.libraryAnchor = index;
+      markLibrarySelection();
+    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", itemKey(item));
+  });
+  if (item.kind === "folder") {
+    row.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      row.classList.add("drop-target");
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("drop-target"));
+    row.addEventListener("drop", (event) => {
+      event.preventDefault();
+      row.classList.remove("drop-target");
+      moveItemsTo(selectedLibraryItems(), item.id);
+    });
+  }
+  return row;
+}
+
+function editRow(value) {
+  const row = document.createElement("div");
+  row.className = "explorer-row selected";
+  const name = document.createElement("span");
+  name.className = "explorer-name";
+  name.append(explorerIcon({ kind: "folder" }), nameInput(value, commitNewFolder));
+  row.append(name);
+  return row;
+}
+
+function nameInput(value, onCommit) {
+  const input = document.createElement("input");
+  input.value = value;
+  input.setAttribute("aria-label", "名称");
+  let closed = false;
+  const finish = (save) => {
+    if (closed) return;
+    closed = true;
+    if (save) onCommit(input.value);
+    else {
+      state.editing = null;
+      paintLibrary();
+    }
+  };
+  input.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("click", (event) => event.stopPropagation());
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 0);
+  return input;
+}
+
+function beginNewFolder() {
+  state.editing = { mode: "create" };
+  paintLibrary();
+}
+
+async function commitNewFolder(name) {
+  state.editing = null;
+  const title = name.trim();
+  if (!title) {
+    paintLibrary();
+    return;
+  }
+  try {
+    await api("/api/library/folders", {
+      method: "POST",
+      body: JSON.stringify({ name: title, parent_id: state.libraryFolder }),
+    });
+    await loadDatabase(state.libraryFolder, { record: false });
+  } catch (error) {
+    showError(error.message);
+    paintLibrary();
+  }
+}
+
+function beginRename(item) {
+  if (!item || item.kind !== "folder") return;
+  state.librarySelection = [itemKey(item)];
+  state.editing = { mode: "rename", key: itemKey(item) };
+  paintLibrary();
+}
+
+async function commitRename(item, name) {
+  state.editing = null;
+  const title = name.trim();
+  if (!title || title === item.name) {
+    paintLibrary();
+    return;
+  }
+  try {
+    await api("/api/library/folders/rename", {
+      method: "POST",
+      body: JSON.stringify({ folder_id: item.id, name: title }),
+    });
+    await loadDatabase(state.libraryFolder, { record: false });
+  } catch (error) {
+    showError(error.message);
+    paintLibrary();
+  }
+}
+
+function selectLibraryRow(item, index, event) {
+  const key = itemKey(item);
+  const keys = state.libraryShown.map(itemKey);
+  if (event.shiftKey && state.libraryAnchor >= 0) {
+    const start = Math.min(state.libraryAnchor, index);
+    const end = Math.max(state.libraryAnchor, index);
+    const range = keys.slice(start, end + 1);
+    state.librarySelection = event.ctrlKey || event.metaKey ? [...new Set([...state.librarySelection, ...range])] : range;
+  } else if (event.ctrlKey || event.metaKey) {
+    state.librarySelection = state.librarySelection.includes(key)
+      ? state.librarySelection.filter((chosen) => chosen !== key)
+      : [...state.librarySelection, key];
+    state.libraryAnchor = index;
+  } else {
+    state.librarySelection = [key];
+    state.libraryAnchor = index;
+  }
+  markLibrarySelection();
+}
+
+function markLibrarySelection() {
+  document.querySelectorAll("#databaseList .explorer-row").forEach((row) => {
+    const selected = state.librarySelection.includes(row.dataset.key);
+    row.classList.toggle("selected", selected);
+    row.classList.toggle("cut", state.clipboard.some((item) => itemKey(item) === row.dataset.key));
+    row.setAttribute("aria-selected", selected ? "true" : "false");
+  });
+  updateExplorerCommands();
+  const status = document.querySelector("#libraryStatus");
+  if (status) {
+    const selected = state.librarySelection.length;
+    status.textContent = selected ? `已选择 ${selected} 个项目，共 ${state.libraryShown.length} 个项目` : `${state.libraryShown.length} 个项目`;
+  }
+}
+
+function selectedLibraryItems() {
+  return state.libraryShown.filter((item) => state.librarySelection.includes(itemKey(item)));
+}
+
+function updateExplorerCommands() {
+  const selected = selectedLibraryItems();
+  document.querySelector("#libraryCut").disabled = !selected.length;
+  document.querySelector("#libraryPaste").disabled = !state.clipboard.length;
+  document.querySelector("#libraryRename").disabled = selected.length !== 1 || selected[0].kind !== "folder";
+  document.querySelector("#libraryMove").disabled = !selected.length;
+  document.querySelector("#libraryDelete").disabled = !selected.length;
+}
+
+function cutSelection() {
+  const items = selectedLibraryItems();
+  if (!items.length) return;
+  state.clipboard = items.map((item) => ({ kind: item.kind, id: item.id, name: item.name }));
+  markLibrarySelection();
+}
+
+async function pasteItems(folderId) {
+  if (!state.clipboard.length) return;
+  await moveItemsTo(state.clipboard, folderId);
+  state.clipboard = [];
+}
+
+async function moveItemsTo(items, folderId) {
+  if (!items.length) return;
+  try {
+    for (const item of items) {
+      if (item.kind === "folder" && item.id === folderId) continue;
+      await api("/api/library/move", {
+        method: "POST",
+        body: JSON.stringify({ kind: item.kind, id: item.id, folder_id: folderId || "" }),
+      });
+    }
+    state.librarySelection = [];
+    await loadDatabase(state.libraryFolder, { record: false });
+  } catch (error) {
+    showError(error.message);
+    await loadDatabase(state.libraryFolder, { record: false });
+  }
+}
+
+function onExplorerKey(event) {
+  if (event.target.matches("input, textarea")) return;
+  const shown = state.libraryShown;
+  if (event.key === "Backspace") {
+    event.preventDefault();
+    libraryUp();
+    return;
+  }
+  if (event.key === "Enter" && selectedLibraryItems().length === 1 && selectedLibraryItems()[0].kind === "folder") {
+    event.preventDefault();
+    loadDatabase(selectedLibraryItems()[0].id).catch((error) => showError(error.message));
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+    event.preventDefault();
+    state.librarySelection = shown.map(itemKey);
+    state.libraryAnchor = 0;
+    markLibrarySelection();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "x") {
+    event.preventDefault();
+    cutSelection();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+    event.preventDefault();
+    pasteItems(state.libraryFolder);
+    return;
+  }
+  if (event.key === "F2") {
+    event.preventDefault();
+    beginRename(selectedLibraryItems()[0]);
+    return;
+  }
+  if (event.key === "Delete") {
+    event.preventDefault();
+    deleteLibraryItems(selectedLibraryItems());
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (!shown.length) return;
+    const current = shown.findIndex((item) => state.librarySelection.includes(itemKey(item)));
+    const next = event.key === "ArrowDown" ? Math.min(shown.length - 1, current + 1) : Math.max(0, current < 0 ? 0 : current - 1);
+    state.librarySelection = [itemKey(shown[next])];
+    state.libraryAnchor = next;
+    markLibrarySelection();
+    document.querySelector(`#databaseList .explorer-row[data-key="${CSS.escape(itemKey(shown[next]))}"]`)?.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function openLibraryMenu(x, y, item) {
+  state.menuOpenedAt = Date.now();
+  const menu = document.querySelector("#libraryMenu");
+  menu.replaceChildren();
+  const add = (label, action, enabled = true) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.role = "menuitem";
+    button.textContent = label;
+    button.disabled = !enabled;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeLibraryMenu();
+      action();
+    });
+    menu.append(button);
+  };
+  if (item) {
+    if (item.kind === "folder") add("打开", () => loadDatabase(item.id).catch((error) => showError(error.message)));
+    add("剪切", () => cutSelection());
+    if (item.kind === "folder") add("粘贴", () => pasteItems(item.id), state.clipboard.length > 0);
+    if (item.kind === "folder") add("重命名", () => beginRename(item));
+    add("移动到…", () => moveLibraryItems(selectedLibraryItems()));
+    add("删除", () => deleteLibraryItems(selectedLibraryItems()));
+  } else {
+    add("新建文件夹", () => beginNewFolder());
+    add("粘贴", () => pasteItems(state.libraryFolder), state.clipboard.length > 0);
+    add("刷新", () => loadDatabase(state.libraryFolder, { record: false }).catch((error) => showError(error.message)));
+  }
+  menu.hidden = false;
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
+  if (rect.bottom > window.innerHeight) menu.style.top = `${Math.max(8, window.innerHeight - rect.height - 8)}px`;
+}
+
+function closeLibraryMenu() {
+  const menu = document.querySelector("#libraryMenu");
+  if (menu) menu.hidden = true;
+}
+
+function moveLibraryItems(items) {
+  if (!items.length) return;
+  state.pickerMode = "move";
+  state.moveItems = items.map((item) => ({ kind: item.kind, id: item.id, name: item.name }));
+  state.pickerFolder = "";
+  const title = items.length > 1 ? `移动 ${items.length} 个项目` : `移动「${items[0].name}」`;
+  document.querySelector("#libraryPickerTitle").textContent = `${title}到当前文件夹`;
+  document.querySelector("#confirmPicker").textContent = "移到此处";
+  document.querySelector("#libraryPicker").showModal();
+  loadPicker("").catch((error) => showError(error.message));
+}
+
+function openLibraryPicker(mode, target = "job") {
+  state.pickerMode = mode;
+  state.pickerTarget = target;
+  state.pickerFolder = "";
+  state.pickerAnchor = -1;
+  state.pickerFiles = mode === "files" ? [...state.jobFiles] : [];
+  state.pickerCode = mode === "code" ? { ...(target === "skill" ? state.skillCode : state.jobCode) } : { id: "", name: "" };
+  document.querySelector("#libraryPickerTitle").textContent = mode === "files" ? "选择文件" : "选择代码";
+  document.querySelector("#confirmPicker").textContent = "使用所选";
+  document.querySelector("#libraryPicker").showModal();
+  loadPicker("").catch((error) => showError(error.message));
+}
+
+async function loadPicker(folderId) {
+  state.pickerFolder = folderId || "";
+  const data = await api(`/api/library?folder_id=${encodeURIComponent(state.pickerFolder)}`);
+  state.pickerCrumbs = data.breadcrumb || [];
+  state.pickerItems = data.items || [];
+  renderAddress(document.querySelector("#pickerCrumbs"), state.pickerCrumbs, (id) => {
+    loadPicker(id).catch((error) => showError(error.message));
+  });
+  paintPicker();
+}
+
+function paintPicker() {
+  state.pickerShown = sortedLibraryItems(state.pickerItems);
+  const list = document.querySelector("#pickerList");
+  list.replaceChildren();
+  if (!state.pickerShown.length) {
+    const empty = document.createElement("p");
+    empty.className = "explorer-empty";
+    empty.textContent = "此文件夹为空";
+    list.append(empty);
+    return;
+  }
+  state.pickerShown.forEach((item, index) => list.append(pickerRow(item, index)));
+  paintSortMarks();
+}
+
+function pickerChosen(item) {
+  if (state.pickerMode === "files") return state.pickerFiles.some((chosen) => chosen.id === item.id);
+  if (state.pickerMode === "code") return state.pickerCode.id === item.id;
+  return false;
+}
+
+function pickerRow(item, index) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "explorer-row";
+  if (pickerChosen(item)) row.classList.add("selected");
+  const check = document.createElement("span");
+  check.className = "explorer-check";
+  check.textContent = pickerChosen(item) ? "✓" : "";
+  const name = document.createElement("span");
+  name.className = "explorer-name";
+  const text = document.createElement("span");
+  text.className = "name-text";
+  text.textContent = item.name;
+  name.append(explorerIcon(item), text);
+  const date = document.createElement("span");
+  date.className = "explorer-date";
+  date.textContent = formatModified(item.modified);
+  const type = document.createElement("span");
+  type.className = "explorer-type";
+  type.textContent = item.type || "";
+  const detail = document.createElement("span");
+  detail.className = "explorer-detail";
+  detail.textContent = item.detail || "";
+  row.append(check, name, date, type, detail);
+  row.addEventListener("click", (event) => selectPickerRow(item, index, event));
+  row.addEventListener("dblclick", () => {
+    if (item.kind === "folder") {
+      loadPicker(item.id).catch((error) => showError(error.message));
+      return;
+    }
+    if (state.pickerMode === "files" && item.kind === "file") togglePickerFile(item, true);
+    if (state.pickerMode === "code" && item.kind === "code") state.pickerCode = { id: item.id, name: item.name };
+    if (state.pickerMode !== "move" && (item.kind === "file" || item.kind === "code")) {
+      applyLibraryPicker();
+      document.querySelector("#libraryPicker").close();
+    }
+  });
+  return row;
+}
+
+function selectPickerRow(item, index, event) {
+  if (item.kind === "folder") return;
+  if (state.pickerMode === "code" && item.kind === "code") {
+    state.pickerCode = { id: item.id, name: item.name };
+    paintPicker();
+    return;
+  }
+  if (state.pickerMode !== "files" || item.kind !== "file") return;
+  if (event.shiftKey && state.pickerAnchor >= 0) {
+    const start = Math.min(state.pickerAnchor, index);
+    const end = Math.max(state.pickerAnchor, index);
+    const range = state.pickerShown.slice(start, end + 1).filter((entry) => entry.kind === "file");
+    if (!(event.ctrlKey || event.metaKey)) state.pickerFiles = [];
+    range.forEach((entry) => togglePickerFile(entry, true));
+  } else if (event.ctrlKey || event.metaKey) {
+    togglePickerFile(item, !pickerChosen(item));
+    state.pickerAnchor = index;
+  } else {
+    state.pickerFiles = [];
+    togglePickerFile(item, true);
+    state.pickerAnchor = index;
+  }
+  paintPicker();
+}
+
+function togglePickerFile(item, checked) {
+  state.pickerFiles = state.pickerFiles.filter((chosen) => chosen.id !== item.id);
+  if (checked) state.pickerFiles.push({ id: item.id, name: item.name });
+}
+
+async function applyLibraryPicker() {
+  if (state.pickerMode === "move" && state.moveItems.length) {
+    await moveItemsTo(state.moveItems, state.pickerFolder);
+    state.moveItems = [];
+    return;
+  }
+  if (state.pickerMode === "files") {
+    state.jobFiles = state.pickerFiles.filter((item) => item.id && !item.id.includes(":"));
+    renderJobPicks();
+    return;
+  }
+  const chosen = state.pickerCode.id ? state.pickerCode : { id: "", name: "" };
+  if (state.pickerTarget === "skill") {
+    state.skillCode = chosen;
+    renderSkillCode();
+  } else {
+    state.jobCode = chosen;
+    renderJobPicks();
   }
 }
 

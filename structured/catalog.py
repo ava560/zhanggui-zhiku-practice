@@ -306,8 +306,20 @@ def replace_rows(
     indexes: Any,
     doc_id: str,
     rows: list[dict[str, Any]],
+    *,
+    lineage: Any = None,
+    code_id: str = "",
+    producer: str = "scheduled_job",
+    job_id: str = "",
+    skill_id: str = "",
+    code_version_id: str = "",
+    steps: list[dict[str, Any]] | None = None,
+    inputs: list[dict[str, Any]] | None = None,
+    unresolved: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """每日任务只增加数据版本。字段不一致时不改当前可查询版本。"""
+    """每日任务只增加数据版本。血缘写入成功后才切换可查询版本。"""
+    from structured.lineage import MemoryLineage, build_lineage, mongo_lineage
+
     current = _ready_table(conn, doc_id)
     columns = _columns(conn, current["import_version_id"])
     names = {column["column_name"] for column in columns}
@@ -322,11 +334,42 @@ def replace_rows(
         _insert_rows(conn, current, columns, records, data_version_id)
     conn.commit()
     indexed = [column for column in columns if column["value_index"]]
-    if indexed:
+    values_changed = bool(indexed) and _indexed_values_changed(conn, current, indexed, data_version_id)
+    if values_changed:
         try:
             indexes.write_values(data_version_id, _value_records(current, indexed, records, data_version_id))
         except Exception as exc:
             raise CatalogError(f"新数据版本的值索引未完成，仍查询旧版本：{exc}") from exc
+    store = lineage if lineage is not None else (mongo_lineage() or MemoryLineage())
+    record = build_lineage(
+        output={
+            "doc_id": current["doc_id"],
+            "table_id": current["table_id"],
+            "import_version_id": current["import_version_id"],
+            "data_version_id": data_version_id,
+        },
+        inputs=inputs
+        if inputs is not None
+        else [
+            {
+                "doc_id": current["doc_id"],
+                "import_version_id": current["import_version_id"],
+                "data_version_id": current["data_version_id"],
+                "source_file": current["source_file"],
+            }
+        ],
+        unresolved=list(unresolved or []),
+        code_id=code_id,
+        producer=producer,
+        job_id=job_id,
+        skill_id=skill_id,
+        code_version_id=code_version_id,
+        steps=steps,
+    )
+    try:
+        store.upsert(record)
+    except Exception as exc:
+        raise CatalogError(f"血缘没有写入，仍查询旧版本：{exc}") from exc
     previous = current["data_version_id"]
     with conn.transaction():
         conn.execute(
@@ -334,7 +377,7 @@ def replace_rows(
             (data_version_id, current["import_version_id"]),
         )
     conn.commit()
-    if indexed and previous:
+    if values_changed and previous:
         indexes.delete_values(previous)
     return {"doc_id": doc_id, "data_version_id": data_version_id, "import_version_id": current["import_version_id"]}
 

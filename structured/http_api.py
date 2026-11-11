@@ -118,13 +118,152 @@ def jobs_preview(job_id: str) -> dict[str, Any]:
         conn.close()
 
 
+def run_due_jobs(now=None) -> list[str]:
+    """按北京时间检查到点任务。调用方每分钟触发一次。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from structured.code_fix import suggest_code_fix
+    from structured.jobs import run_due
+
+    moment = now or datetime.now(ZoneInfo("Asia/Shanghai"))
+    conn = open_db()
+    try:
+        ensure_builtin_codes(conn)
+        from structured.lineage import describe_processing
+
+        return run_due(
+            conn,
+            REGISTRY,
+            live_index(),
+            moment,
+            store=MinioStore(),
+            fixer=suggest_code_fix,
+            narrator=describe_processing,
+        )
+    finally:
+        conn.close()
+
+
 def jobs_run(job_id: str) -> dict[str, Any]:
     from structured.code_fix import suggest_code_fix
 
     conn = open_db()
     try:
         ensure_builtin_codes(conn)
-        return run_job(conn, job_id, REGISTRY, live_index(), store=MinioStore(), fixer=suggest_code_fix)
+        from structured.lineage import describe_processing
+
+        return run_job(
+            conn,
+            job_id,
+            REGISTRY,
+            live_index(),
+            store=MinioStore(),
+            fixer=suggest_code_fix,
+            narrator=describe_processing,
+        )
+    finally:
+        conn.close()
+
+
+def library_view(folder_id: str = "") -> dict[str, Any]:
+    from structured.library import list_library
+
+    conn = open_db()
+    try:
+        return list_library(conn, folder_id)
+    finally:
+        conn.close()
+
+
+def library_make_folder(name: str, parent_id: str = "") -> dict[str, str]:
+    from structured.library import create_folder
+
+    conn = open_db()
+    try:
+        return create_folder(conn, name, parent_id)
+    finally:
+        conn.close()
+
+
+def library_rename_folder(folder_id: str, name: str) -> dict[str, str]:
+    from structured.library import rename_folder
+
+    conn = open_db()
+    try:
+        return rename_folder(conn, folder_id, name)
+    finally:
+        conn.close()
+
+
+def lineage_board() -> dict[str, Any]:
+    from structured.lineage import list_lineage, present_lineage
+    from structured.schema import ensure_schema
+
+    listed = list_lineage()
+    if listed.get("message"):
+        return listed
+    conn = open_db()
+    try:
+        ensure_schema(conn)
+        files = {
+            row["doc_id"]: row["source_file"]
+            for row in conn.execute(
+                """
+                SELECT DISTINCT ON (doc_id) doc_id, source_file
+                FROM doc_info
+                WHERE status <> 'archived'
+                ORDER BY doc_id, created_at DESC
+                """
+            ).fetchall()
+        }
+        jobs = {row["job_id"]: row["name"] for row in conn.execute("SELECT job_id, name FROM data_job").fetchall()}
+        codes = {
+            row["code_id"]: row["name"]
+            for row in conn.execute("SELECT code_id, name FROM code_version WHERE status = 'ready'").fetchall()
+        }
+        listed["records"] = present_lineage(listed["records"], files=files, jobs=jobs, codes=codes)
+        conn.rollback()
+        return listed
+    finally:
+        conn.close()
+
+
+def data_tables() -> dict[str, Any]:
+    from structured.removal import list_tables
+
+    conn = open_db()
+    try:
+        return list_tables(conn)
+    finally:
+        conn.close()
+
+
+def library_remove_item(kind: str, item_id: str) -> dict[str, str]:
+    from structured.indexes import live_index
+    from structured.removal import delete_milvus_file, delete_minio_basename, remove_library_item
+
+    conn = open_db()
+    try:
+        return remove_library_item(
+            conn,
+            kind,
+            item_id,
+            store=MinioStore(),
+            indexes=live_index(),
+            milvus_delete=delete_milvus_file,
+            delete_basename=delete_minio_basename,
+        )
+    finally:
+        conn.close()
+
+
+def library_move_item(kind: str, item_id: str, folder_id: str = "") -> dict[str, str]:
+    from structured.library import move_item
+
+    conn = open_db()
+    try:
+        return move_item(conn, kind, item_id, folder_id)
     finally:
         conn.close()
 

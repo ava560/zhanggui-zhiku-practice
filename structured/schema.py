@@ -157,6 +157,8 @@ def _ensure_extensions(conn: Connection) -> None:
     conn.execute("ALTER TABLE data_job ADD COLUMN IF NOT EXISTS schedule_kind text NOT NULL DEFAULT 'daily'")
     conn.execute("ALTER TABLE data_job ADD COLUMN IF NOT EXISTS schedule_day integer")
     conn.execute("ALTER TABLE data_job ADD COLUMN IF NOT EXISTS skill_id text")
+    conn.execute("ALTER TABLE data_job ADD COLUMN IF NOT EXISTS run_started_at timestamptz")
+    conn.execute("ALTER TABLE data_job ADD COLUMN IF NOT EXISTS last_duration_seconds integer")
     conn.execute(
         """
         DO $$
@@ -189,6 +191,28 @@ def _ensure_extensions(conn: Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS code_version_one_ready
             ON code_version (code_id) WHERE status = 'ready'
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS library_folder (
+            folder_id text PRIMARY KEY,
+            name text NOT NULL,
+            parent_id text NOT NULL DEFAULT '',
+            created_at timestamptz NOT NULL DEFAULT now(),
+            CONSTRAINT library_folder_name CHECK (name <> '')
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS library_placement (
+            item_kind text NOT NULL,
+            item_id text NOT NULL,
+            folder_id text NOT NULL DEFAULT '',
+            PRIMARY KEY (item_kind, item_id),
+            CONSTRAINT library_placement_kind CHECK (item_kind IN ('file', 'code', 'upload'))
+        )
         """
     )
     conn.execute(

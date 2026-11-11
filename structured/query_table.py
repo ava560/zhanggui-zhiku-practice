@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import re
 from typing import Any
 
@@ -18,6 +19,23 @@ METRIC_UNCONFIRMED = "metric_unconfirmed"
 METADATA_MISSING = "metadata_missing"
 _FILTERS = {"eq", "neq", "contains", "gte", "lte", "in"}
 _TOKEN = re.compile(r"[A-Za-z0-9_\-\.]+|[\u4e00-\u9fff]{2,}")
+MAX_STATEMENT_MS = 30 * 60 * 1000
+_statement_budget: contextvars.ContextVar[int | None] = contextvars.ContextVar("statement_budget_ms", default=None)
+
+
+def bind_statement_budget(timeout_ms: int | None) -> None:
+    _statement_budget.set(None if timeout_ms is None else statement_timeout_ms(timeout_ms))
+
+
+def statement_timeout_ms(timeout_ms: int | None) -> int:
+    """语句时限取本次剩余时间，最长 30 分钟。"""
+    if timeout_ms is None:
+        return MAX_STATEMENT_MS
+    try:
+        value = int(timeout_ms)
+    except (TypeError, ValueError):
+        return MAX_STATEMENT_MS
+    return max(1, min(value, MAX_STATEMENT_MS))
 
 
 def query_table_data(
@@ -26,6 +44,7 @@ def query_table_data(
     conn=None,
     indexes: Any = None,
     plan: dict[str, Any] | None = None,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     opened = None
     try:
@@ -34,7 +53,8 @@ def query_table_data(
             opened = connect()
             conn = opened
             prepare(conn)
-        return _query(conn, question, indexes=indexes, plan=plan)
+        chosen = timeout_ms if timeout_ms is not None else _statement_budget.get()
+        return _query(conn, question, indexes=indexes, plan=plan, timeout_ms=statement_timeout_ms(chosen))
     except (DatabaseConfigError, psycopg.OperationalError, psycopg.InterfaceError) as exc:
         return _reason(QUERY_FAILED, type(exc).__name__)
     finally:
@@ -43,7 +63,7 @@ def query_table_data(
             opened.close()
 
 
-def _query(conn, question: str, *, indexes: Any, plan: dict[str, Any] | None) -> dict[str, Any]:
+def _query(conn, question: str, *, indexes: Any, plan: dict[str, Any] | None, timeout_ms: int) -> dict[str, Any]:
     if plan and plan.get("sql"):
         return _reason(METRIC_UNCONFIRMED, "不执行自由 SQL")
     catalog = ready_metadata(conn)
@@ -58,13 +78,13 @@ def _query(conn, question: str, *, indexes: Any, plan: dict[str, Any] | None) ->
     active = plan or _heuristic_plan(question, chosen[0], indexes, catalog)
     if active.get("metric_unconfirmed"):
         return _reason(METRIC_UNCONFIRMED)
-    result = _run_plan(conn, chosen[0], active)
+    result = _run_plan(conn, chosen[0], active, timeout_ms)
     if relation_gap:
         result["gaps"] = ["没有登记表间关联，只返回能够单独确定的部分"]
     return result
 
 
-def _run_plan(conn, table: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+def _run_plan(conn, table: dict[str, Any], plan: dict[str, Any], timeout_ms: int = MAX_STATEMENT_MS) -> dict[str, Any]:
     if plan.get("sql") or plan.get("join"):
         return _reason(METRIC_UNCONFIRMED, "不执行自由 SQL，也不自动连接")
     columns = {column["column_id"]: column for column in table["columns"]}
@@ -87,6 +107,7 @@ def _run_plan(conn, table: dict[str, Any], plan: dict[str, Any]) -> dict[str, An
         with conn.transaction():
             if own_transaction:
                 conn.execute("SET LOCAL transaction_read_only = on")
+            conn.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
             rows = conn.execute(statement, params).fetchall()
     except psycopg.Error as exc:
         return _reason(QUERY_FAILED, type(exc).__name__)

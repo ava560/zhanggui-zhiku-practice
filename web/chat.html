@@ -31,6 +31,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5h5l-4 3 2 5-5-3-5 3 2-5-4-3h5z" /></svg>
             技能
           </button>
+          <button class="nav-item" id="openLineage" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h4v4H6zM14 7h4v4h-4zM10 15h4v4h-4zM8 11v2h8M12 13v2" /></svg>
+            数据血缘
+          </button>
         </nav>
         <p class="side-label">最近 <span id="conversationCount">0</span></p>
         <nav class="conversation-list" id="conversationList" aria-label="历史对话">
@@ -40,11 +44,12 @@
           <div class="user-menu" id="userMenu" hidden>
             <button type="button" data-view="memory">个性化</button>
             <a href="/">上传文件</a>
+            <button type="button" data-view="tables">数据表</button>
             <button type="button" data-view="database">数据库</button>
           </div>
           <button class="sidebar-user" id="openUserMenu" type="button" aria-expanded="false" aria-controls="userMenu">
             <span class="avatar" aria-hidden="true">灵</span>
-            <span class="user-copy"><strong>数据台</strong><small>已发布的表</small></span>
+            <span class="user-copy"><strong>数据台</strong><small>全部文件</small></span>
           </button>
         </div>
       </aside>
@@ -57,6 +62,7 @@
           </button>
           <button class="icon-button mobile-menu" id="openSidebar" type="button" aria-label="打开菜单">☰</button>
           <div class="current-chat"><span class="current-chat-label">小灵 / 金融知识</span><strong id="currentTitle">新对话</strong></div>
+          <button class="desk-ghost" id="closeDesk" type="button" hidden>返回对话</button>
           <span class="save-indicator"><i aria-hidden="true"></i> 自动保存</span>
         </header>
 
@@ -65,7 +71,7 @@
             <div class="desk-head">
               <div>
                 <h1>定时任务</h1>
-                <p>按每天、每周或每月运行已经指定的代码。钟点只保存，到点不会自动跑，对话也不会运行这些代码。</p>
+                <p>按每天、每周或每月运行已经指定的代码。按北京时间到点运行。文件和代码从数据库里选择。对话里不执行这些代码。</p>
               </div>
               <button class="desk-solid" id="openJobDialog" type="button">设置任务</button>
             </div>
@@ -100,11 +106,64 @@
           </div>
         </section>
 
-        <section class="desk-view" id="databaseView" hidden>
+        <section class="desk-view" id="lineageView" hidden>
           <div class="desk-panel">
-            <h1>数据库</h1>
-            <p class="lead">这里是已发布的表。</p>
-            <div class="card-grid" id="databaseList"></div>
+            <div class="desk-head">
+              <div>
+                <h1>数据血缘</h1>
+                <p>点开一条，看这次读了哪些输入文件、用了哪段代码，以及任务跑完后由模型补上的加工步骤和描述。</p>
+              </div>
+            </div>
+            <div class="card-grid" id="lineageList"></div>
+            <article class="job-detail" id="lineageDetail" hidden></article>
+          </div>
+        </section>
+
+        <section class="desk-view" id="tablesView" hidden>
+          <div class="desk-panel">
+            <div class="desk-head">
+              <div>
+                <h1>数据表</h1>
+                <p>先列出四张元数据表，下面是已经确认、当前可以查询的业务表。点开可以看字段；元数据表还会给出最近几行，不显示原件键和校验值。</p>
+              </div>
+            </div>
+            <div class="card-grid" id="tableList"></div>
+            <article class="job-detail" id="tableDetail" hidden></article>
+          </div>
+        </section>
+
+        <section class="desk-view" id="databaseView" hidden>
+          <div class="desk-panel explorer">
+            <div class="desk-head">
+              <div>
+                <h1>数据库</h1>
+                <p>按资源管理器的方式浏览。单击选中，双击打开文件夹，剪切后到目标位置粘贴，也可以拖到文件夹上。</p>
+              </div>
+            </div>
+            <div class="explorer-bar">
+              <button class="explorer-nav" id="libraryBack" type="button" aria-label="后退">←</button>
+              <button class="explorer-nav" id="libraryForward" type="button" aria-label="前进">→</button>
+              <button class="explorer-nav" id="libraryUp" type="button" aria-label="向上一级">↑</button>
+              <nav class="explorer-address" id="libraryCrumbs" aria-label="地址栏"></nav>
+            </div>
+            <div class="explorer-commands">
+              <button class="desk-ghost" id="newFolder" type="button">新建文件夹</button>
+              <button class="desk-ghost" id="libraryCut" type="button" disabled>剪切</button>
+              <button class="desk-ghost" id="libraryPaste" type="button" disabled>粘贴</button>
+              <button class="desk-ghost" id="libraryRename" type="button" disabled>重命名</button>
+              <button class="desk-ghost" id="libraryMove" type="button" disabled>移动到</button>
+              <button class="desk-ghost" id="libraryDelete" type="button" disabled>删除</button>
+            </div>
+            <div class="explorer-frame" id="explorerFrame" tabindex="0">
+              <div class="explorer-head">
+                <button type="button" data-sort="name">名称</button>
+                <button type="button" data-sort="modified">修改日期</button>
+                <button type="button" data-sort="type">类型</button>
+                <span>说明</span>
+              </div>
+              <div class="explorer-list" id="databaseList" role="listbox" aria-label="文件" aria-multiselectable="true"></div>
+            </div>
+            <p class="explorer-status" id="libraryStatus">0 个项目</p>
           </div>
         </section>
 
@@ -154,11 +213,16 @@
         <label>重复 <select id="jobCadence" name="cadence"><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label>
         <label id="jobDayLabel" hidden>日期 <select id="jobDay" name="day"></select></label>
         <label>运行时刻 <input id="jobRunAt" name="runAt" type="time" value="09:00" required /></label>
-        <fieldset class="file-picks">
-          <legend>涉及文件</legend>
-          <div id="jobDocs"></div>
-        </fieldset>
-        <label>指定代码 <select id="jobCode" name="code"></select></label>
+        <div class="picker-row">
+          <span>涉及文件</span>
+          <button class="desk-ghost" id="pickJobFiles" type="button">从数据库选择</button>
+          <p class="job-meta" id="jobFileNames">还没有选择文件</p>
+        </div>
+        <div class="picker-row">
+          <span>指定代码</span>
+          <button class="desk-ghost" id="pickJobCode" type="button">从数据库选择</button>
+          <p class="job-meta" id="jobCodeName">不指定，不会运行</p>
+        </div>
         <label>技能 <select id="jobSkill" name="skill"></select></label>
         <div class="dialog-actions">
           <button class="desk-ghost" id="cancelJob" type="button">取消</button>
@@ -173,13 +237,41 @@
         <label>名称 <input id="skillName" name="name" maxlength="80" required /></label>
         <label>简短说明 <input id="skillSummary" name="summary" maxlength="200" placeholder="卡片上显示的一句话" /></label>
         <label>做法 <textarea id="skillInstructions" name="instructions" maxlength="4000" required placeholder="回答时要遵守的步骤"></textarea></label>
-        <label>定时任务代码 <select id="skillCode" name="code"></select></label>
+        <div class="picker-row">
+          <span>定时任务代码</span>
+          <button class="desk-ghost" id="pickSkillCode" type="button">从数据库选择</button>
+          <p class="job-meta" id="skillCodeName">不绑定代码</p>
+        </div>
         <div class="dialog-actions">
           <button class="desk-ghost" id="cancelSkill" type="button">取消</button>
           <button class="desk-solid" type="submit">保存技能</button>
         </div>
       </form>
     </dialog>
+    <dialog class="job-dialog explorer-dialog" id="libraryPicker" aria-labelledby="libraryPickerTitle">
+      <form id="libraryPickerForm">
+        <h2 id="libraryPickerTitle">从数据库选择</h2>
+        <div class="explorer-bar">
+          <button class="explorer-nav" id="pickerUp" type="button" aria-label="向上一级">↑</button>
+          <nav class="explorer-address" id="pickerCrumbs" aria-label="地址栏"></nav>
+        </div>
+        <div class="explorer-frame picking" id="pickerFrame">
+          <div class="explorer-head">
+            <span class="explorer-check"></span>
+            <button type="button" data-sort="name">名称</button>
+            <button type="button" data-sort="modified">修改日期</button>
+            <button type="button" data-sort="type">类型</button>
+            <span>说明</span>
+          </div>
+          <div class="explorer-list" id="pickerList" role="listbox" aria-label="选择文件"></div>
+        </div>
+        <div class="dialog-actions">
+          <button class="desk-ghost" id="cancelPicker" type="button">取消</button>
+          <button class="desk-solid" id="confirmPicker" type="submit">使用所选</button>
+        </div>
+      </form>
+    </dialog>
+    <div class="explorer-menu" id="libraryMenu" hidden role="menu"></div>
     <script src="/chat.js" defer></script>
   </body>
 </html>

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,9 @@ def run_agent_workflow(
 
     _use_direct_service_connections()
     question = str(state.get("current_question") or "").strip()
+    if not state.get("user_question"):
+        state["user_question"] = question
+    _bind_query_budget(state.get("deadline_monotonic"))
     if not question:
         state["final_answer"] = "问题不能为空。"
         state["evidence_status"] = "unsupported"
@@ -47,7 +51,8 @@ def run_agent_workflow(
     history = list(state.get("conversation_history") or [])[-10:]
     caller = llm or default_llm
     active_ports = ports or build_ports()
-    decider = decide_followup or (lambda pack, followups: _decide_with_llm(pack, followups, caller))
+    skill_steps = str(state.get("skill_instructions") or "")
+    decider = decide_followup or (lambda pack, followups: _decide_with_llm(pack, followups, caller, skill_steps))
 
     if _resuming_confirmation(state):
         return _continue_after_confirmation(state, active_ports, decider, answerer)
@@ -60,6 +65,7 @@ def run_agent_workflow(
             history=history,
             session_memory=state.get("session_memory") or {},
             long_term=state.get("long_term_memory") or [],
+            skill=str(state.get("skill_instructions") or ""),
         )
     except IntentClassificationError as exc:
         state["final_answer"] = str(exc)
@@ -76,7 +82,7 @@ def run_agent_workflow(
     if intent == "simple":
         return _finish_simple(state, run_private_evidence(state, active_ports), answerer)
 
-    active_planner = planner or (lambda context: _plan_with_llm(context, caller))
+    active_planner = planner or (lambda context: _plan_with_llm({**context, "skill": skill_steps}, caller))
 
     def private_runner(action: dict[str, Any]) -> dict[str, Any]:
         sub_state = dict(state)
@@ -140,6 +146,7 @@ def run_agent_workflow(
         table_results.extend(item.get("table_results") or [])
         if item.get("table_reason") == "query_failed":
             gaps.append("结构化数据查询失败，不能据此判断表里是否有记录。")
+    gaps = _maybe_write_back(state, table_results, gaps)
     display = list(result.get("chunks") or []) + table_display_chunks(table_results)
     if any(item.get("status") == "retrieval_error" for item in result.get("evidences") or []) and not display:
         state["final_answer"] = RETRIEVAL_ERROR
@@ -205,7 +212,7 @@ def _finish_simple(state: dict[str, Any], result: dict[str, Any], answerer) -> d
         state["citations"] = []
         return state
     web_error = str(result.get("web_search_error") or "")
-    gaps = list(result.get("gaps") or [])
+    gaps = _maybe_write_back(state, list(result.get("table_results") or []), list(result.get("gaps") or []))
     note = _table_message(reason)
     if note and note not in gaps:
         gaps.append(note)
@@ -257,6 +264,7 @@ def _write_model_answer(state, chunks, gaps, web_error, answerer, trace=None):
             history=list(state.get("conversation_history") or [])[-10:],
             session_memory=state.get("session_memory") or {},
             long_term=state.get("long_term_memory") or [],
+            skill=str(state.get("skill_instructions") or ""),
         )
     else:
         answer = answerer(state, ranked, gaps, web_error)
@@ -291,7 +299,63 @@ def _rerank_with_bge(question: str, chunks: list[dict[str, Any]]) -> list[dict[s
     return ranked or chunks
 
 
-def _decide_with_llm(pack: dict[str, Any], followups: list, llm) -> str | None:
+def _bind_query_budget(deadline: Any) -> None:
+    from structured.query_table import bind_statement_budget
+
+    if not isinstance(deadline, (int, float)):
+        bind_statement_budget(None)
+        return
+    bind_statement_budget(int((float(deadline) - time.monotonic()) * 1000))
+
+
+def _maybe_write_back(state: dict[str, Any], table_results: list[dict[str, Any]], gaps: list[str]) -> list[str]:
+    from structured.writeback import wants_writeback, write_back_rows
+
+    question = str(state.get("user_question") or state.get("current_question") or "")
+    if not wants_writeback(question):
+        return gaps
+    notes = list(gaps)
+    if not table_results:
+        notes.append("没有可写回的表结果")
+        return notes
+    try:
+        from structured.indexes import live_index
+        from structured.session import open_db
+
+        try:
+            indexes = live_index()
+        except Exception:
+            indexes = _RejectingIndex()
+        conn = open_db()
+        try:
+            for table in table_results:
+                outcome = write_back_rows(
+                    conn,
+                    indexes,
+                    str(table.get("table_id") or ""),
+                    list(table.get("rows") or []),
+                    question=question,
+                    skill_id=str(state.get("skill_id") or ""),
+                )
+                message = str(outcome.get("message") or "")
+                if message and message not in notes:
+                    notes.append(message)
+        finally:
+            conn.close()
+    except Exception:
+        notes.append("写回没有完成，当前可查询版本不变")
+    return notes
+
+
+class _RejectingIndex:
+    def write_values(self, *_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("值索引不可用")
+
+    def delete_values(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+def _decide_with_llm(pack: dict[str, Any], followups: list, llm, skill: str = "") -> str | None:
     """证据还不够时，最多再问一个可检索的追问。"""
     if len(followups) >= 2 or (pack.get("status") == "supported" and not pack.get("gaps")):
         return None
@@ -301,6 +365,8 @@ def _decide_with_llm(pack: dict[str, Any], followups: list, llm) -> str | None:
         f"当前问题：{pack.get('question_rewritten')}。状态：{pack.get('status')}。"
         f"缺口：{json.dumps(pack.get('gaps') or [], ensure_ascii=False)}。"
     )
+    if str(skill or "").strip():
+        prompt += f"技能步骤：{str(skill).strip()}。步骤不改写用户原话。"
     try:
         raw = str(llm(prompt) or "")
     except Exception:
@@ -329,6 +395,8 @@ def _plan_with_llm(context: dict[str, Any], llm) -> list[dict[str, Any]]:
         f"已派发 {context.get('dispatches', 0)} 次，已补查 {context.get('supplements_done', 0)} 轮。"
         f"目标：{context.get('goal')}。已有状态：{json.dumps(statuses, ensure_ascii=False)}。"
     )
+    if str(context.get("skill") or "").strip():
+        prompt += f"技能步骤：{str(context.get('skill')).strip()}。步骤不能增加动作。"
     try:
         raw = llm(prompt)
     except Exception:

@@ -4,11 +4,33 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from chat_safety import RESTRICTED_REPLY, is_restricted_question, redact_configured_secrets
+
+
+def _deadline() -> float:
+    return time.monotonic() + 30 * 60
+
+
+def _run_limited(fn: Callable[..., Any], value: Any, deadline: float) -> Any:
+    """到点后不再等待。已经开始的模型调用无法从线程里掐断，但这次不作为完成结果返回。"""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AnswerError("运行超过 30 分钟，这次没有完成。")
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(fn, value)
+    try:
+        return future.result(timeout=remaining)
+    except FuturesTimeout:
+        raise AnswerError("运行超过 30 分钟，这次没有完成。") from None
+    finally:
+        pool.shutdown(wait=False)
 
 
 PENDING_STATE_KEYS = (
@@ -19,6 +41,7 @@ PENDING_STATE_KEYS = (
     "item_name_confirm_status", "item_name_confirmation_message",
     "awaiting_user_confirmation", "query_plan", "session_memory", "answer_mode",
     "agent_intent", "react_trace", "extracted_names", "long_term_memory", "use_web_search",
+    "skill_instructions", "skill_id", "user_question",
 )
 
 
@@ -169,12 +192,15 @@ class ChatService:
         item_name_user_confirmed: bool | None = None,
         answer_mode: str = "auto",
         use_web_search: bool = True,
+        skill_instructions: str = "",
+        skill_id: str = "",
     ) -> dict[str, Any]:
         question = content.strip()
         if not question or len(question) > 4000:
             raise ValueError("问题不能为空，且不能超过 4000 字")
         scope = self._scope(user_id, conversation_id)
         with self._lock_for(conversation_id):
+            deadline = _deadline()
             conversation = self.conversations.find_one(scope)
             if conversation is None:
                 raise LookupError("对话不存在")
@@ -234,9 +260,16 @@ class ChatService:
                         answer_mode=answer_mode,
                     )
                 state["use_web_search"] = use_web_search
+                state["skill_instructions"] = skill_instructions
+                state["skill_id"] = skill_id
+                state["deadline_monotonic"] = deadline
+                if not state.get("user_question"):
+                    state["user_question"] = question
                 state["conversation_history"] = self._recent_history(user_id, conversation_id)
                 try:
-                    state = self.workflow(state)
+                    state = _run_limited(self.workflow, state, deadline)
+                except AnswerError:
+                    raise
                 except Exception as exc:
                     raise AnswerError("检索或回答失败，问题已保存，请检查服务连接和后台日志") from exc
                 memory = state.get("session_memory")
@@ -256,7 +289,9 @@ class ChatService:
                         for message in self.get(user_id, conversation_id)["messages"][-30:]
                     ]
                     try:
-                        answer_text = self.answer(history).strip()
+                        answer_text = _run_limited(self.answer, history, deadline).strip()
+                    except AnswerError:
+                        raise
                     except Exception as exc:
                         raise AnswerError("普通对话回答失败，问题已保存，请检查模型连接") from exc
                     if not answer_text:
@@ -289,7 +324,9 @@ class ChatService:
                 for message in self.get(user_id, conversation_id)["messages"][-30:]
             ]
             try:
-                answer_text = self.answer(history).strip()
+                answer_text = _run_limited(self.answer, history, deadline).strip()
+            except AnswerError:
+                raise
             except Exception as exc:
                 raise AnswerError("回答生成失败，问题已保存，请检查模型配置或稍后再试") from exc
             if not answer_text:
@@ -303,6 +340,8 @@ class ChatService:
         item_name_user_confirmed: bool | None = None,
         answer_mode: str = "auto",
         use_web_search: bool = True,
+        skill_instructions: str = "",
+        skill_id: str = "",
         on_status=None,
     ):
         """先发出状态，再按已核对句段发出答案。最终只归档一条助手消息。"""
@@ -317,6 +356,7 @@ class ChatService:
             raise ValueError("web_search 必须是布尔值")
         scope = self._scope(user_id, conversation_id)
         with self._lock_for(conversation_id):
+            deadline = _deadline()
             conversation = self.conversations.find_one(scope)
             if conversation is None:
                 raise LookupError("对话不存在")
@@ -379,11 +419,18 @@ class ChatService:
                     )
                 state["answer_mode"] = answer_mode
                 state["use_web_search"] = use_web_search
+                state["skill_instructions"] = skill_instructions
+                state["skill_id"] = skill_id
+                state["deadline_monotonic"] = deadline
+                if not state.get("user_question"):
+                    state["user_question"] = question
                 state["on_status"] = on_status
                 state["defer_answer_generation"] = True
                 state["conversation_history"] = self._recent_history(user_id, conversation_id)
                 try:
-                    state = self.workflow(state)
+                    state = _run_limited(self.workflow, state, deadline)
+                except AnswerError:
+                    raise
                 except Exception as exc:
                     raise AnswerError("检索或回答失败，问题已保存，请检查服务连接和后台日志") from exc
                 memory = state.get("session_memory")
@@ -406,7 +453,7 @@ class ChatService:
                     for message in self.get(user_id, conversation_id)["messages"][-30:]
                 ]
                 pieces = self.stream_answer(history) if self.stream_answer else stream_model_answer(history)
-                message = yield from self._emit_released(scope, pieces, evidence="", question=question, citations=None, evidence_status="")
+                message = yield from self._emit_released(scope, pieces, evidence="", question=question, citations=None, evidence_status="", deadline=deadline)
                 if message is None:
                     raise AnswerError("模型没有返回回答，问题已保存")
                 return
@@ -463,6 +510,7 @@ class ChatService:
                 scope,
                 pieces,
                 evidence=evidence + "\n" + background,
+                deadline=deadline,
                 question=question,
                 citations=_citation_list(state),
                 evidence_status=str(state.get("evidence_status") or ""),
@@ -489,11 +537,14 @@ class ChatService:
         question: str,
         citations: list[dict[str, Any]] | None,
         evidence_status: str,
+        deadline: float | None = None,
     ):
         from search.answer_stream import iter_released
 
         released: list[str] = []
         for sentence in iter_released(pieces, evidence=evidence, question=question):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise AnswerError("运行超过 30 分钟，这次没有完成。")
             released.append(sentence)
             yield {"event": "answer_delta", "data": {"text": sentence}}
         text = "".join(released).strip()
